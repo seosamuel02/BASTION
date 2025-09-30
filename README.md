@@ -1,5 +1,11 @@
 # BASTION
-<img width="3840" height="3632" alt="Untitled diagram _ Mermaid Chart-2025-09-30-003730" src="https://github.com/user-attachments/assets/540f1f5b-8f9c-433b-b584-f8202b042f4a" />
+<img width="1920" height="1816" alt="Untitled diagram _ Mermaid Chart-2025-09-30-003730" src="https://github.com/user-attachments/assets/540f1f5b-8f9c-433b-b584-f8202b042f4a" />
+
+
+
+
+
+
 
 <환경 분리>
 SOAR(Shuffle) → 로컬PC/ 클라우드 환경이 아닌 로컬PC에 서버를 두는 이유는 SOAR는 FN/FP 진단 로직, ML 모델 호출, 복잡한 API 오케스트레이션 등 CPU와 RAM을 집중적으로 사용하는 중앙 두뇌 역할을 수행합니다. AWS 무료 티어의 자원 제약 t2.micro에서 벗어나 개발 및 테스트 속도를 극대화하기 위함
