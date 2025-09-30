@@ -14,3 +14,17 @@ SOAR(Shuffle) → 로컬PC/ 클라우드 환경이 아닌 로컬PC에 서버를 
 Victim VM → 클라우드/ BAS 공격의 재현성과 격리된 환경을 보장해야하며 Ansible로 Agent를 자동으로 설치하고 테스트 후 인프라를 쉽게 폐기하는 Iac 호름 검증을 위함.
 
 BAS/SIEM Core(Caldera, Wazuh Manager, ELK Stack) → 클라우드/ 안정적인 공인 IP와 가용성을 확보, 칼데라의 TTP 실행 로그를 안정적으로 수집/저장 해야함.
+
+#테라폼으로 클라우드 자원을 프로비저닝 하고 앤서블로 그 위에 애플리케이션을 구성하는 표준 자동화 방식 진행
+
+Terraform으로 VM 2개 생성
+
+1. Caldera와 Wazuh Stack이 구동될 클라우드 VM
+   
+1a. AWS EC2에 VM 정의 및 배포 
+
+1b. 네트워크 설정을 해야함 VPC를 생성했을 때 Caldera C2 서버 포트, Wazuh Agent 통신 포트 등을 허용하는 보안 그룹을 구성해야함.
+
+2. BAS 공격을 받을 피해자 VM ← 어택 테스트 시뮬레이션용
+
+2a. 테라폼으로 만든 VM 위에서 실하게 되는데 VM에 필요한 소프트웨어 설치, Agent 배포, 서비스 간의 IP 주소 설정 → 도커 컴포즈 실행/ 에이전트 배포 자동화/ 초기 SOAR 설정 등 3가지 생각됨
