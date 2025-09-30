@@ -1,11 +1,15 @@
 # BASTION
 <img width="1920" height="1816" alt="Untitled diagram _ Mermaid Chart-2025-09-30-003730" src="https://github.com/user-attachments/assets/540f1f5b-8f9c-433b-b584-f8202b042f4a" />
 
-
-
-
-
-
+1. SOAR 셔플 → 칼데라 : SOAR 셔플이 칼데라 API를 호출하여 TTP 공격을 지시하고 컨텍스트를 기록
+   
+2. Wazuh → ELK Stack  : Wazuh Agent가 로그를 수집하고 Manager가 생성한 Alert JSON을 Elasticsearch에 저장
+   
+3. 셔플 → Elastic API : 셔플이 Elasticsearch API를 호출하여 공격 컨텍스트에 해당하는 Alert가 있는지 조회. Alert가 없다면 미탐(FN) 확정
+   
+4. 셔플 → Wazuh API : FN이 확정 시 SOAR가 Wazuh API를 호출하여 새로운 XML 룰 코드를 전송하고 룰셋을 자동 재로드 하도록 명령
+   
+5. 셔플 → 칼데라 : 룰 수정 완료 후, SOAR가 칼데라에게 동일 공격을 재실행 하여 개선 효과를 자율적으로 검증하게 하여 폐쇄 루프 구조를 이룸.
 
 <환경 분리>
 
