@@ -14,10 +14,20 @@ try:
     from .app.integration_engine import IntegrationEngine
 except Exception:
     try:
-        from bas_wazuh.integration_engine import IntegrationEngine
+        from bas_wazuh.app.integration_engine import IntegrationEngine
     except Exception:
         from importlib import import_module
         IntegrationEngine = import_module('integration_engine').IntegrationEngine
+
+# Discover helper import (for test API)
+try:
+    from .app.discover import discover_search as _discover_search
+except Exception:
+    try:
+        from bas_wazuh.app.discover import discover_search as _discover_search
+    except Exception:
+        from importlib import import_module
+        _discover_search = import_module('discover').discover_search
 
 
 def _to_dt(value):
@@ -172,6 +182,50 @@ async def _ping(request: web.Request):
 
 
 # ----------------------
+# API: /discover/search (GET)
+# ----------------------
+
+@check_authorization
+async def discover_search_api(request: web.Request):
+    q = request.query.get('q') or request.query.get('query')
+    index = request.query.get('index')
+    size = request.query.get('size')
+    sort = request.query.get('sort') or '@timestamp:desc'
+    time_from = request.query.get('from') or request.query.get('time_from')
+    time_to = request.query.get('to') or request.query.get('time_to')
+    fields_raw = request.query.get('fields')
+    filters_raw = request.query.get('filters')
+
+    try:
+        size = int(size) if size else 100
+    except Exception:
+        size = 100
+
+    fields = None
+    if fields_raw:
+        fields = [s.strip() for s in fields_raw.split(',') if s.strip()]
+
+    filters = None
+    if filters_raw:
+        try:
+            filters = json.loads(filters_raw)
+        except Exception:
+            filters = None
+
+    result = _discover_search(
+        q,
+        index=index,
+        time_from=time_from,
+        time_to=time_to,
+        size=size,
+        sort=sort,
+        fields=fields,
+        filters=filters,
+    )
+    return web.json_response(result)
+
+
+# ----------------------
 # API: /operations/start (POST) and /detections (GET)
 # ----------------------
 
@@ -263,6 +317,7 @@ async def enable(services):
     # API routes
     app.router.add_route('POST', '/operations/start', start_operation)
     app.router.add_route('GET', '/detections', get_detections)
+    app.router.add_route('GET', '/discover/search', discover_search_api)
 
     try:
         for r in app.router.routes():

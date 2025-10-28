@@ -1,7 +1,7 @@
 # Wazuh Indexer(OpenSearch/Elasticsearch)
 wazuh:
   scheme: "https"          # http | https
-  host: "172.31.52.212"
+  host: "localhost"
   port: 9200
   username: "admin"
   password: "password"
