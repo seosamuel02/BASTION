@@ -43,8 +43,6 @@ const dashboardData = reactive({
     last_seen: null
   },
   operations: [],
-  tactic_coverage: [],
-  timeline: [],
   detection_events: [],
   query_time: null
 });
@@ -158,7 +156,7 @@ const filteredDetections = computed(() => {
     detections = detections.filter(d => d.agent_name === selectedAgentHost.value);
   }
 
-  // Apply OS filter
+  // Apply OS filter (agent platform만 체크)
   if (filters.os_filter !== 'all') {
     detections = detections.filter(d => {
       // Find matching agent by hostname
@@ -280,31 +278,69 @@ const filteredKPI = computed(() => {
   };
 });
 
-// Chart Data for Tactic Coverage (Bar Chart)
+// Chart Data for Tactic Coverage (Bar Chart) - OS Filter 적용
 const tacticChartData = computed(() => {
-  if (!dashboardData.tactic_coverage || dashboardData.tactic_coverage.length === 0) {
-    return {
-      labels: [],
-      datasets: []
-    };
+  // OS filter를 적용한 tactic 통계 재계산
+  const tacticStats = {};
+
+  // 1. Executed 통계 (filteredOperations의 attack_steps)
+  for (const op of filteredOperations.value) {
+    for (const step of (op.attack_steps || [])) {
+      // OS filter 확인
+      if (filters.os_filter !== 'all') {
+        const agentPlatform = op.agent_platforms?.[step.paw];
+        if (!agentPlatform) continue;
+
+        const platform = agentPlatform.toLowerCase();
+        const filterOs = filters.os_filter.toLowerCase();
+        if (platform !== filterOs && !platform.includes(filterOs)) {
+          continue; // OS가 맞지 않으면 스킵
+        }
+      }
+
+      const tactic = step.tactic;
+      if (tactic) {
+        if (!tacticStats[tactic]) {
+          tacticStats[tactic] = { executed: 0, detected: 0 };
+        }
+        tacticStats[tactic].executed += 1;
+      }
+    }
+  }
+
+  // 2. Detected 통계 (filteredDetections)
+  for (const detection of filteredDetections.value) {
+    const tactic = detection.tactic;
+    if (tactic) {
+      if (!tacticStats[tactic]) {
+        tacticStats[tactic] = { executed: 0, detected: 0 };
+      }
+      tacticStats[tactic].detected += 1;
+    }
+  }
+
+  // 3. Chart 데이터 생성
+  const tactics = Object.keys(tacticStats).sort();
+  if (tactics.length === 0) {
+    return { labels: [], datasets: [] };
   }
 
   return {
-    labels: dashboardData.tactic_coverage.map(t => t.tactic),
+    labels: tactics,
     datasets: [
       {
         label: 'Executed',
         backgroundColor: 'rgba(255, 221, 87, 0.6)',
         borderColor: '#ffdd57',
         borderWidth: 1,
-        data: dashboardData.tactic_coverage.map(t => t.executed)
+        data: tactics.map(t => tacticStats[t].executed)
       },
       {
         label: 'Detected',
         backgroundColor: 'rgba(72, 199, 116, 0.8)',
         borderColor: '#48c774',
         borderWidth: 1,
-        data: dashboardData.tactic_coverage.map(t => t.detected)
+        data: tactics.map(t => tacticStats[t].detected)
       }
     ]
   };
@@ -356,9 +392,54 @@ const tacticChartOptions = {
   }
 };
 
+// Filtered Timeline based on selected operation and OS filter
+const filteredTimeline = computed(() => {
+  const timelineMap = {};
+
+  // 1. Attack steps 집계 (Operation filter + OS filter)
+  for (const op of filteredOperations.value) {
+    for (const step of (op.attack_steps || [])) {
+      // OS filter 확인
+      if (filters.os_filter !== 'all') {
+        const agentPlatform = op.agent_platforms?.[step.paw];
+        if (!agentPlatform) continue;
+
+        const platform = agentPlatform.toLowerCase();
+        const filterOs = filters.os_filter.toLowerCase();
+        if (platform !== filterOs && !platform.includes(filterOs)) {
+          continue; // OS가 맞지 않으면 스킵
+        }
+      }
+
+      if (step.timestamp) {
+        const bucket = step.timestamp.substring(0, 16);
+        if (!timelineMap[bucket]) {
+          timelineMap[bucket] = { time: bucket, attacks: 0, detections: 0 };
+        }
+        timelineMap[bucket].attacks += 1;
+      }
+    }
+  }
+
+  // 2. Detections 집계 (이미 filteredDetections에서 OS filter 적용됨)
+  filteredDetections.value.forEach(detection => {
+    if (detection.timestamp) {
+      const bucket = detection.timestamp.substring(0, 16);
+      if (!timelineMap[bucket]) {
+        timelineMap[bucket] = { time: bucket, attacks: 0, detections: 0 };
+      }
+      timelineMap[bucket].detections += 1;
+    }
+  });
+
+  return Object.values(timelineMap).sort((a, b) => a.time.localeCompare(b.time));
+});
+
 // Chart Data for Timeline (Line Chart)
 const timelineChartData = computed(() => {
-  if (!dashboardData.timeline || dashboardData.timeline.length === 0) {
+  const timeline = filteredTimeline.value;
+
+  if (!timeline || timeline.length === 0) {
     return {
       labels: [],
       datasets: []
@@ -366,7 +447,7 @@ const timelineChartData = computed(() => {
   }
 
   return {
-    labels: dashboardData.timeline.map((d, i) => `T${i}`),
+    labels: timeline.map((d, i) => `T${i}`),
     datasets: [
       {
         label: 'Attacks',
@@ -377,7 +458,7 @@ const timelineChartData = computed(() => {
         tension: 0.4,
         pointRadius: 3,
         pointHoverRadius: 5,
-        data: dashboardData.timeline.map(d => d.attacks)
+        data: timeline.map(d => d.attacks)
       },
       {
         label: 'Detections',
@@ -388,7 +469,7 @@ const timelineChartData = computed(() => {
         tension: 0.4,
         pointRadius: 3,
         pointHoverRadius: 5,
-        data: dashboardData.timeline.map(d => d.detections)
+        data: timeline.map(d => d.detections)
       }
     ]
   };
@@ -443,11 +524,9 @@ const timelineChartOptions = {
   <div id="bastionPage">
     <!-- Header -->
     <div class="mb-5">
-      <div @mouseover="showSubText = true" @mouseleave="showSubText = false">
-        <h2 class="title is-2">
-          CALDERA × Wazuh BAS Dashboard
-        </h2>
-      </div>
+      <h1 class="title is-1">
+        Bastion
+      </h1>
       <p class="subtitle is-6 has-text-grey-light">공격 시뮬레이션과 탐지 이벤트를 연계하여 커버리지와 리스크를 한눈에.</p>
     </div>
     <hr>
@@ -657,29 +736,24 @@ const timelineChartOptions = {
                 <p class="is-size-7">조회된 작전이 없습니다.</p>
               </div>
               <div v-else>
-                <div v-for="op in filteredOperations" :key="op.id" class="box has-background-black-ter operation-card-small mb-3">
-                  <div class="is-flex is-justify-content-space-between is-align-items-start">
-                    <div style="flex: 1;">
-                      <p class="title is-6 mb-1">{{ op.name }}</p>
-                      <p class="subtitle is-7 has-text-grey-light mb-2">{{ op.id }}</p>
-                      <p class="is-size-7 has-text-grey mb-2">
-                        {{ formatTimestamp(op.started) }}
-                        <span v-if="op.finished"> → {{ formatTimestamp(op.finished) }}</span>
-                        <span v-else class="has-text-warning"> → running</span>
-                      </p>
-                      <div class="tags">
-                        <span class="tag is-info is-light is-small">{{ op.agent_count }} agents</span>
-                        <span class="tag is-warning is-light is-small">{{ op.attack_steps.length }} steps</span>
-                        <span class="tag is-success is-light is-small">{{ op.techniques.length }} techniques</span>
-                      </div>
-                    </div>
-                    <div class="has-text-right ml-2">
-                      <p class="title is-5 has-text-weight-bold"
-                         :class="(op.techniques.length > 0 ? op.attack_steps.filter(s => s.technique_id).length / op.techniques.length : 0) >= 0.7 ? 'has-text-success' : 'has-text-warning'">
-                        {{ formatCoverage(op.techniques.length > 0 ? op.attack_steps.filter(s => s.technique_id).length / op.techniques.length : 0) }}
-                      </p>
-                      <p class="is-size-7 has-text-grey">coverage</p>
-                    </div>
+                <div v-for="op in filteredOperations" :key="op.id" class="box has-background-black-ter operation-card-small mb-3" style="padding: 1rem;">
+                  <p class="has-text-weight-semibold mb-2" style="font-size: 0.95rem; line-height: 1.3;">
+                    {{ op.name }}
+                  </p>
+                  <p class="is-size-7 has-text-grey-light mb-3 is-family-monospace" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2;">
+                    {{ op.id }}
+                  </p>
+                  <p class="is-size-7 has-text-grey mb-3" style="line-height: 1.2;">
+                    {{ formatTimestamp(op.started) }}
+                    <span v-if="op.finished"> → {{ formatTimestamp(op.finished) }}</span>
+                    <span v-else-if="op.state === 'running'" class="has-text-warning"> → running</span>
+                    <span v-else-if="op.state === 'finished'" class="has-text-success"> → finished</span>
+                    <span v-else class="has-text-info"> → {{ op.state }}</span>
+                  </p>
+                  <div class="tags are-small" style="display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 0;">
+                    <span class="tag is-info is-light">{{ op.agent_count }} agents</span>
+                    <span class="tag is-warning is-light">{{ op.attack_steps.length }} steps</span>
+                    <span class="tag is-success is-light">{{ op.techniques.length }} techniques</span>
                   </div>
                 </div>
               </div>
