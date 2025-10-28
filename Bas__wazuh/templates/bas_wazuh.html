@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>BAS-Wazuh 연동 테스트</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --ok:#2e7d32; --warn:#e65100; --err:#b71c1c; --muted:#666; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 16px; }
+    header { margin-bottom: 16px; }
+    h1 { margin: 0 0 8px; font-size: 20px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+    label { font-size: 14px; color: #333; }
+    select, input[type=number] { padding: 6px 8px; font-size: 14px; }
+    button { padding: 6px 10px; font-size: 14px; cursor: pointer; }
+    .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 4px; }
+    .btn-primary { border-color: #2f72ff; background: #2f72ff; color: #fff; }
+    .btn-outline { border-color: #999; background: #fff; }
+    .muted { color: var(--muted); }
+    .section { border: 1px solid #eee; padding: 12px; border-radius: 6px; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { background: #fafafa; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .badge-ok { background: #e8f5e9; color: var(--ok); border: 1px solid #c8e6c9; }
+    .badge-no { background: #fff3e0; color: var(--warn); border: 1px solid #ffe0b2; }
+    details { margin: 4px 0; }
+    pre { background: #fafafa; padding: 8px; border: 1px solid #eee; border-radius: 6px; overflow: auto; max-height: 240px; }
+    .error { color: var(--err); font-weight: 600; }
+  </style>
+  <script>
+    function q(id){ return document.getElementById(id); }
+    function selOp(){ return q('opSelect').value; }
+    function selWin(){ return q('winInput').value; }
+
+    function updateLinks(){
+      const op = encodeURIComponent(selOp() || '');
+      const win = encodeURIComponent(selWin() || '');
+      q('downloadLink').href = `/plugin/bas_wazuh/download?op_id=${op}&window=${win}`;
+      q('guiLink').href = `/plugin/bas_wazuh/gui?op_id=${op}&window=${win}`;
+    }
+
+    async function startOperation(){
+      const op = selOp();
+      if(!op){ alert('Operation을 선택하세요'); return; }
+      const win = parseInt(selWin() || '');
+      const body = { op_id: op };
+      if(!isNaN(win)) body.time_window_sec = win;
+      q('startOut').textContent = '요청 중...';
+      try{
+        const res = await fetch('/operations/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        q('startOut').textContent = JSON.stringify(data, null, 2);
+      }catch(e){
+        q('startOut').textContent = '에러: ' + (e && e.message ? e.message : e);
+      }
+    }
+
+    async function getDetections(){
+      const op = selOp();
+      if(!op){ alert('Operation을 선택하세요'); return; }
+      const win = selWin();
+      q('detectOut').textContent = '요청 중...';
+      try{
+        const url = new URL(window.location.origin + '/detections');
+        url.searchParams.set('op_id', op);
+        if(win) url.searchParams.set('time_window_sec', win);
+        const res = await fetch(url, { credentials: 'same-origin' });
+        const data = await res.json();
+        q('detectOut').textContent = JSON.stringify(data, null, 2);
+      }catch(e){
+        q('detectOut').textContent = '에러: ' + (e && e.message ? e.message : e);
+      }
+    }
+
+    function onChange(){ updateLinks(); }
+    document.addEventListener('DOMContentLoaded', updateLinks);
+  </script>
+  {% set ops = ops or [] %}
+  {% set selected_op_id = selected_op_id or '' %}
+  {% set time_window_sec = time_window_sec or 60 %}
+  {% set results = results %}
+  {% set error = error %}
+  <script>
+    document.addEventListener('DOMContentLoaded', function(){
+      const sel = document.getElementById('opSelect');
+      if(sel){ sel.value = '{{ selected_op_id }}'; }
+      updateLinks();
+    });
+  </script>
+  <noscript>이 페이지는 JavaScript가 필요합니다.</noscript>
+</head>
+<body>
+  <header>
+    <h1>BAS-Wazuh 연동 테스트</h1>
+    <div class="muted">Caldera Operation 실행 기록과 Wazuh Indexer 탐지 매칭</div>
+  </header>
+
+  <div class="section">
+    <div class="row">
+      <label for="opSelect">Operation 선택</label>
+      <select id="opSelect" onchange="onChange()">
+        {% if ops|length == 0 %}
+          <option value="">(Operation 없음)</option>
+        {% else %}
+          {% for o in ops %}
+            <option value="{{ o.id }}">{{ o.name }} ({{ o.start }})</option>
+          {% endfor %}
+        {% endif %}
+      </select>
+
+      <label for="winInput">시간 창(초)</label>
+      <input id="winInput" type="number" min="1" step="1" value="{{ time_window_sec }}" onchange="onChange()" />
+
+      <a id="guiLink" class="btn btn-outline" href="#" title="서버에서 재계산(GUI)">GUI 새로고침</a>
+      <a id="downloadLink" class="btn btn-outline" href="#" title="결과 JSON 다운로드">JSON 다운로드</a>
+    </div>
+
+    <div class="row">
+      <button class="btn" onclick="startOperation()">/operations/start 호출</button>
+      <button class="btn btn-primary" onclick="getDetections()">/detections 호출</button>
+    </div>
+
+    <div class="row" style="gap:16px; align-items: flex-start;">
+      <div style="flex:1; min-width: 320px;">
+        <div class="muted">operations/start 응답</div>
+        <pre id="startOut">(대기 중)</pre>
+      </div>
+      <div style="flex:1; min-width: 320px;">
+        <div class="muted">detections 응답</div>
+        <pre id="detectOut">(대기 중)</pre>
+      </div>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="section"><span class="error">오류:</span> {{ error }}</div>
+  {% endif %}
+
+  <div class="section">
+    <h2 style="margin:0 0 8px; font-size:16px;">서버 계산 결과(GUI 컨텍스트)</h2>
+    {% if results %}
+      <table>
+        <thead>
+          <tr>
+            <th>Ability</th>
+            <th>Technique</th>
+            <th>실행 시간</th>
+            <th>탐지</th>
+            <th>상세</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in results %}
+            <tr>
+              <td>{{ r.ability_name or '(알 수 없음)' }}</td>
+              <td>{{ r.technique_id or '-' }}</td>
+              <td>{{ r.executed_at or '-' }}</td>
+              <td>
+                {% if r.detected %}
+                  <span class="badge badge-ok">탐지됨 ({{ r.match_count }})</span>
+                {% else %}
+                  <span class="badge badge-no">미탐지</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if r.matches and r.matches|length > 0 %}
+                  <details>
+                    <summary>{{ r.matches|length }}개 매칭 열기</summary>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>@timestamp</th>
+                          <th>rule.id</th>
+                          <th>mitre.id</th>
+                          <th>agent</th>
+                          <th>message</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {% for m in r.matches %}
+                          <tr>
+                            <td>{{ m['@timestamp'] }}</td>
+                            <td>{{ m['rule.id'] or '-' }}</td>
+                            <td>{{ m['mitre.id'] or '-' }}</td>
+                            <td>{{ m['agent.name'] or '' }} ({{ m['agent.id'] or '' }})</td>
+                            <td>{{ m['description'] or '-' }}</td>
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </details>
+                {% else %}
+                  <span class="muted">-</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="muted">표시할 결과가 없습니다. Operation과 시간 창을 선택한 뒤, 상단 링크로 GUI를 새로고침하거나 API를 호출하세요.</div>
+    {% endif %}
+  </div>
+
+</body>
+</html>
+

@@ -1,0 +1,24 @@
+# Wazuh Indexer(OpenSearch/Elasticsearch)
+wazuh:
+  scheme: "https"          # http | https
+  host: "172.31.52.212"
+  port: 9200
+  username: "admin"
+  password: "password"
+  verify_ssl: false        # 사설 인증서면 false. 가능하면 사설 CA 등록 후 true 권장
+  index_pattern: "wazuh-alerts-4.x-*"  # 일자별 인덱스 패턴
+
+# 매핑/탐지 파라미터
+match:
+  time_window_sec: 120     # link 실행 시각 기준 ±N초
+  # 1) 기본: MITRE technique 기반 매칭
+  mitre_fields:
+    - "rule.mitre.id"
+    - "mitre.id"
+    - "data.mitre.id"
+  # 2) 보조: 메시지/태그 기반(옵션)
+  message_fields:
+    - "rule.description"
+    - "full_log"
+  # 반환 제한
+  max_alerts: 50

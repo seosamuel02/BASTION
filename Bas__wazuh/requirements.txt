@@ -1,0 +1,5 @@
+opensearch-py>=2.4.0
+PyYAML>=6.0.1
+aiohttp>=3.9.0
+aiohttp-jinja2>=1.5
+Jinja2>=3.1.2
