@@ -2,260 +2,399 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <title>BAS-Wazuh 연동 테스트</title>
+  <title>BAS ↔ Wazuh 연동 대시보드</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Bulma + FA (lightweight, no build step) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+
   <style>
-    :root { --ok:#2e7d32; --warn:#e65100; --err:#b71c1c; --muted:#666; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 16px; }
-    header { margin-bottom: 16px; }
-    h1 { margin: 0 0 8px; font-size: 20px; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-    label { font-size: 14px; color: #333; }
-    select, input[type=number] { padding: 6px 8px; font-size: 14px; }
-    button { padding: 6px 10px; font-size: 14px; cursor: pointer; }
-    .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 4px; }
-    .btn-primary { border-color: #2f72ff; background: #2f72ff; color: #fff; }
-    .btn-outline { border-color: #999; background: #fff; }
-    .muted { color: var(--muted); }
-    .section { border: 1px solid #eee; padding: 12px; border-radius: 6px; margin-bottom: 16px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; vertical-align: top; }
-    th { background: #fafafa; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    :root { --ok:#2e7d32; --warn:#e65100; --err:#b71c1c; --muted:#8c8c8c; }
+    .is-card { border-left: 4px solid transparent; background:#1f1f1f; color:#f5f5f5; }
+    .is-card.ok { border-left-color:#48c774; }
+    .is-card.warn { border-left-color:#ffe08a; }
+    .is-card.err { border-left-color:#f14668; }
+    .is-muted { color:var(--muted); }
+    .scroll { overflow:auto; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    table.table { background: transparent; color:#f5f5f5; }
+    table.table th { color:#b5b5b5; border-color:#363636; }
+    table.table td { border-color:#363636; }
+    table.table.is-striped tbody tr:nth-child(even){ background-color: rgba(255,255,255,0.04); }
+    .badge { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
     .badge-ok { background: #e8f5e9; color: var(--ok); border: 1px solid #c8e6c9; }
     .badge-no { background: #fff3e0; color: var(--warn); border: 1px solid #ffe0b2; }
-    details { margin: 4px 0; }
-    pre { background: #fafafa; padding: 8px; border: 1px solid #eee; border-radius: 6px; overflow: auto; max-height: 240px; }
-    .error { color: var(--err); font-weight: 600; }
+    .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 6px; padding: 6px 10px; }
+    .btn-primary { border-color:#2f72ff; background:#2f72ff; color:#fff; }
+    .btn-ghost { background:#fff; }
+    .kibana-hint { font-size: 12px; color:#b5b5b5; }
   </style>
-  <script>
-    function q(id){ return document.getElementById(id); }
-    function selOp(){ return q('opSelect').value; }
-    function selWin(){ return q('winInput').value; }
 
-    function updateLinks(){
-      const op = encodeURIComponent(selOp() || '');
-      const win = encodeURIComponent(selWin() || '');
-      q('downloadLink').href = `/plugin/bas_wazuh/download?op_id=${op}&window=${win}`;
-      q('guiLink').href = `/plugin/bas_wazuh/gui?op_id=${op}&window=${win}`;
-    }
+  <!-- Alpine.js -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
 
-    async function startOperation(){
-      const op = selOp();
-      if(!op){ alert('Operation을 선택하세요'); return; }
-      const win = parseInt(selWin() || '');
-      const body = { op_id: op };
-      if(!isNaN(win)) body.time_window_sec = win;
-      q('startOut').textContent = '요청 중...';
-      try{
-        const res = await fetch('/operations/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify(body)
-        });
-        const data = await res.json();
-        q('startOut').textContent = JSON.stringify(data, null, 2);
-      }catch(e){
-        q('startOut').textContent = '에러: ' + (e && e.message ? e.message : e);
-      }
-    }
-
-    async function getDetections(){
-      const op = selOp();
-      if(!op){ alert('Operation을 선택하세요'); return; }
-      const win = selWin();
-      q('detectOut').textContent = '요청 중...';
-      try{
-        const url = new URL(window.location.origin + '/detections');
-        url.searchParams.set('op_id', op);
-        if(win) url.searchParams.set('time_window_sec', win);
-        const res = await fetch(url, { credentials: 'same-origin' });
-        const data = await res.json();
-        q('detectOut').textContent = JSON.stringify(data, null, 2);
-      }catch(e){
-        q('detectOut').textContent = '에러: ' + (e && e.message ? e.message : e);
-      }
-    }
-
-    function onChange(){ updateLinks(); }
-    document.addEventListener('DOMContentLoaded', updateLinks);
-  </script>
   {% set ops = ops or [] %}
   {% set selected_op_id = selected_op_id or '' %}
   {% set time_window_sec = time_window_sec or 60 %}
   {% set results = results %}
   {% set error = error %}
-  <script>
-    document.addEventListener('DOMContentLoaded', function(){
-      const sel = document.getElementById('opSelect');
-      if(sel){ sel.value = '{{ selected_op_id }}'; }
-      updateLinks();
-    });
-  </script>
-  <noscript>이 페이지는 JavaScript가 필요합니다.</noscript>
 </head>
-<body>
-  <header>
-    <h1>BAS-Wazuh 연동 테스트</h1>
-    <div class="muted">Caldera Operation 실행 기록과 Wazuh Indexer 탐지 매칭</div>
-  </header>
-
-  <div class="section">
-    <div class="row">
-      <label for="opSelect">Operation 선택</label>
-      <select id="opSelect" onchange="onChange()">
-        {% if ops|length == 0 %}
-          <option value="">(Operation 없음)</option>
-        {% else %}
-          {% for o in ops %}
-            <option value="{{ o.id }}">{{ o.name }} ({{ o.start }})</option>
-          {% endfor %}
-        {% endif %}
-      </select>
-
-      <label for="winInput">시간 창(초)</label>
-      <input id="winInput" type="number" min="1" step="1" value="{{ time_window_sec }}" onchange="onChange()" />
-
-      <a id="guiLink" class="btn btn-outline" href="#" title="서버에서 재계산(GUI)">GUI 새로고침</a>
-      <a id="downloadLink" class="btn btn-outline" href="#" title="결과 JSON 다운로드">JSON 다운로드</a>
-    </div>
-
-    <div class="row">
-      <button class="btn" onclick="startOperation()">/operations/start 호출</button>
-      <button class="btn btn-primary" onclick="getDetections()">/detections 호출</button>
-    </div>
-
-    <div class="row" style="gap:16px; align-items: flex-start;">
-      <div style="flex:1; min-width: 320px;">
-        <div class="muted">operations/start 응답</div>
-        <pre id="startOut">(대기 중)</pre>
+<body class="has-background-black-ter">
+  <section class="section pt-5 pb-4">
+    <div class="container is-fluid" x-data="basWazuh()">
+      <div class="is-flex is-align-items-center is-justify-content-space-between mb-3">
+        <div>
+          <h1 class="title is-4 has-text-white">BAS ↔ Wazuh 대시보드</h1>
+          <p class="subtitle is-6 is-muted">Caldera Operation 실행 기록과 Wazuh Indexer 탐지 상관관계</p>
+        </div>
+        <div class="buttons">
+          <button class="button is-small" @click="refreshAll">
+            <span class="icon"><i :class="loading ? 'fas fa-spinner fa-pulse' : 'fas fa-rotate-right'"></i></span>
+            <span x-text="loading ? '갱신 중...' : '새로고침'"></span>
+          </button>
+          <button class="button is-small is-link" @click="openKibana">
+            <span class="icon"><i class="fas fa-external-link"></i></span><span>Kibana 열기</span>
+          </button>
+        </div>
       </div>
-      <div style="flex:1; min-width: 320px;">
-        <div class="muted">detections 응답</div>
-        <pre id="detectOut">(대기 중)</pre>
+
+      <!-- Health -->
+      <div class="columns is-multiline">
+        <div class="column is-3">
+          <div class="box is-card" :class="health.plugin==='healthy' ? 'ok':'err'">
+            <p class="heading has-text-grey-light">BASTION 플러그인</p>
+            <p class="title is-6" x-text="health.plugin || 'unknown'"></p>
+          </div>
+        </div>
+        <div class="column is-3">
+          <div class="box is-card" :class="health.wazuh_manager==='healthy' ? 'ok' : 'err'">
+            <p class="heading has-text-grey-light">Wazuh Manager</p>
+            <p class="title is-6" x-text="health.wazuh_manager || 'unknown'"></p>
+          </div>
+        </div>
+        <div class="column is-3">
+          <div class="box is-card" :class="(health.wazuh_indexer||'').match(/green|healthy/i) ? 'ok' : 'warn'">
+            <p class="heading has-text-grey-light">Wazuh Indexer</p>
+            <p class="title is-6" x-text="health.wazuh_indexer || 'unknown'"></p>
+          </div>
+        </div>
+        <div class="column is-3">
+          <div class="box is-card" :class="health.authenticated ? 'ok' : 'warn'">
+            <p class="heading has-text-grey-light">인증 상태</p>
+            <p class="title is-6" x-text="health.authenticated ? 'Authenticated' : 'Not Authenticated'"></p>
+          </div>
+        </div>
       </div>
-    </div>
-  </div>
 
-  {% if error %}
-    <div class="section"><span class="error">오류:</span> {{ error }}</div>
-  {% endif %}
+      <!-- Operations / Detections -->
+      <div class="box is-card mb-4">
+        <div class="is-flex is-align-items-center is-justify-content-space-between">
+          <h2 class="title is-5">Operation & 탐지 API</h2>
+          <div class="kibana-hint">엔드포인트: <span class="mono">/operations/start</span>, <span class="mono">/detections</span></div>
+        </div>
 
-  <div class="section">
-    <h2 style="margin:0 0 8px; font-size:16px;">서버 계산 결과(GUI 컨텍스트)</h2>
-    {% if results %}
-      <table>
-        <thead>
-          <tr>
-            <th>Ability</th>
-            <th>Technique</th>
-            <th>실행 시간</th>
-            <th>탐지</th>
-            <th>상세</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for r in results %}
-            <tr>
-              <td>{{ r.ability_name or '(알 수 없음)' }}</td>
-              <td>{{ r.technique_id or '-' }}</td>
-              <td>{{ r.executed_at or '-' }}</td>
-              <td>
-                {% if r.detected %}
-                  <span class="badge badge-ok">탐지됨 ({{ r.match_count }})</span>
+        <div class="columns is-vcentered is-mobile mb-3">
+          <div class="column is-narrow">
+            <label class="label is-size-7">Operation</label>
+          </div>
+          <div class="column">
+            <!-- If rendered with Jinja, options will appear here -->
+            <div class="select is-fullwidth">
+              <select x-ref="opSelect" x-model="state.selectedOp">
+                {% if ops|length == 0 %}
+                  <option value="">(Operation 없음)</option>
                 {% else %}
-                  <span class="badge badge-no">미탐지</span>
+                  {% for o in ops %}
+                    <option value="{{ o.id }}">{{ o.name }} ({{ o.start }})</option>
+                  {% endfor %}
                 {% endif %}
-              </td>
-              <td>
-                {% if r.matches and r.matches|length > 0 %}
-                  <details>
-                    <summary>{{ r.matches|length }}개 매칭 열기</summary>
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>@timestamp</th>
-                          <th>rule.id</th>
-                          <th>mitre.id</th>
-                          <th>agent</th>
-                          <th>message</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {% for m in r.matches %}
+              </select>
+            </div>
+          </div>
+
+          <div class="column is-narrow">
+            <label class="label is-size-7">시간 창(초)</label>
+          </div>
+          <div class="column is-narrow">
+            <input class="input is-small" type="number" min="1" step="1" x-model.number="state.windowSec" placeholder="60" value="{{ time_window_sec }}">
+          </div>
+
+          <div class="column is-narrow">
+            <button class="button is-small" @click="startOperation">
+              <span class="icon"><i :class="state.starting ? 'fas fa-spinner fa-pulse' : 'fas fa-play'"></i></span>
+              <span>작전 시작</span>
+            </button>
+          </div>
+          <div class="column is-narrow">
+            <button class="button is-small is-primary" @click="loadDetections">
+              <span class="icon"><i :class="state.loadingDet ? 'fas fa-spinner fa-pulse' : 'fas fa-magnifying-glass'"></i></span>
+              <span>탐지 조회</span>
+            </button>
+          </div>
+          <div class="column is-narrow">
+            <a class="button is-small is-ghost" :href="downloadHref" @click.prevent="downloadJSON">
+              <span class="icon"><i class="fas fa-file-download"></i></span><span>JSON</span>
+            </a>
+          </div>
+          <div class="column is-narrow">
+            <a class="button is-small is-ghost" :href="guiHref" @click.prevent="reloadGUI">
+              <span class="icon"><i class="fas fa-window-restore"></i></span><span>GUI</span>
+            </a>
+          </div>
+        </div>
+
+        <div class="columns" style="gap:16px;">
+          <div class="column">
+            <p class="is-size-7 is-muted">operations/start 응답</p>
+            <pre class="mono scroll" style="max-height:260px;" x-text="state.startOut || '(대기 중)'"></pre>
+          </div>
+          <div class="column">
+            <p class="is-size-7 is-muted">detections 응답</p>
+            <pre class="mono scroll" style="max-height:260px;" x-text="state.detectOut || '(대기 중)'"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Discover -->
+      <div class="box is-card mb-4">
+        <div class="is-flex is-align-items-center is-justify-content-space-between">
+          <h2 class="title is-5">Discover Search 테스트</h2>
+          <div class="kibana-hint">엔드포인트: <span class="mono">/discover/search</span>, <span class="mono">/discover/indices</span></div>
+        </div>
+
+        <div class="columns is-multiline">
+          <div class="column is-8">
+            <input class="input is-small" placeholder="query string (예: rule.level:>=10 AND data.mitre.id:T1057)" x-model="disc.q">
+          </div>
+          <div class="column is-4">
+            <div class="field has-addons">
+              <p class="control is-expanded">
+                <div class="select is-fullwidth is-small">
+                  <select x-model="disc.index">
+                    <option value="">(index 자동)</option>
+                    <template x-for="name in indices" :key="name">
+                      <option :value="name" x-text="name"></option>
+                    </template>
+                  </select>
+                </div>
+              </p>
+              <p class="control">
+                <button class="button is-small" @click="loadIndices">
+                  <span class="icon"><i :class="state.loadingIdx ? 'fas fa-spinner fa-pulse' : 'fas fa-database'"></i></span>
+                  <span>인덱스</span>
+                </button>
+              </p>
+            </div>
+            <p class="kibana-hint mt-1" x-text="idxHint"></p>
+          </div>
+
+          <div class="column is-3"><input class="input is-small" placeholder="from (ISO/epoch)" x-model="disc.frm"></div>
+          <div class="column is-3"><input class="input is-small" placeholder="to (ISO/epoch)" x-model="disc.to"></div>
+          <div class="column is-3"><input class="input is-small" placeholder="fields (comma separated)" x-model="disc.fields"></div>
+          <div class="column is-2"><input class="input is-small" type="number" min="1" step="1" x-model.number="disc.size" placeholder="100"></div>
+          <div class="column is-1">
+            <button class="button is-small is-primary is-fullwidth" @click="discoverSearch">
+              <span class="icon"><i :class="state.loadingDisc ? 'fas fa-spinner fa-pulse' : 'fas fa-search'"></i></span>
+            </button>
+          </div>
+        </div>
+
+        <pre class="mono scroll" style="max-height:360px;" x-text="state.discOut || '(empty)'"></pre>
+      </div>
+
+      <!-- Results table (server-rendered context) -->
+      <div class="box is-card">
+        <h2 class="title is-5">서버 계산 결과 (GUI 컨텍스트)</h2>
+        {% if results %}
+          <div class="table-container">
+            <table class="table is-fullwidth is-striped is-hoverable">
+              <thead>
+                <tr>
+                  <th>Ability</th>
+                  <th>Technique</th>
+                  <th>실행 시간</th>
+                  <th>탐지</th>
+                  <th>상세</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for r in results %}
+                <tr>
+                  <td>{{ r.ability_name or '(알 수 없음)' }}</td>
+                  <td>{{ r.technique_id or '-' }}</td>
+                  <td>{{ r.executed_at or '-' }}</td>
+                  <td>
+                    {% if r.detected %}
+                      <span class="badge badge-ok">탐지됨 ({{ r.match_count }})</span>
+                    {% else %}
+                      <span class="badge badge-no">미탐지</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if r.matches and r.matches|length > 0 %}
+                    <details>
+                      <summary>{{ r.matches|length }}개 매칭 열기</summary>
+                      <table class="table is-fullwidth">
+                        <thead><tr><th>@timestamp</th><th>rule.id</th><th>mitre.id</th><th>agent</th><th>message</th></tr></thead>
+                        <tbody>
+                          {% for m in r.matches %}
                           <tr>
                             <td>{{ m['@timestamp'] }}</td>
                             <td>{{ m['rule.id'] or '-' }}</td>
                             <td>{{ m['mitre.id'] or '-' }}</td>
                             <td>{{ m['agent.name'] or '' }} ({{ m['agent.id'] or '' }})</td>
-                            <td>{{ m['description'] or '-' }}</td>
+                            <td class="mono">{{ m['description'] or '-' }}</td>
                           </tr>
-                        {% endfor %}
-                      </tbody>
-                    </table>
-                  </details>
-                {% else %}
-                  <span class="muted">-</span>
-                {% endif %}
-              </td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <div class="muted">표시할 결과가 없습니다. Operation과 시간 창을 선택한 뒤, 상단 링크로 GUI를 새로고침하거나 API를 호출하세요.</div>
-    {% endif %}
-  </div>
-
-  <div class="section">
-    <h2 style="margin:0 0 8px; font-size:16px;">Discover Search Test</h2>
-    <div class="row" style="gap:8px; align-items:flex-start;">
-      <input id="discQuery" placeholder="query string (e.g., rule.level:>=10)" style="flex:2; min-width:240px;" />
-      <input id="discIndex" placeholder="index pattern (optional)" style="flex:1; min-width:200px;" />
-      <input id="discFrom" placeholder="from (ISO or epoch)" style="flex:1; min-width:200px;" />
-      <input id="discTo" placeholder="to (ISO or epoch)" style="flex:1; min-width:200px;" />
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </details>
+                    {% else %}
+                      <span class="is-muted">-</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="is-muted">표시할 결과가 없습니다. 상단에서 Operation/시간 창을 설정한 뒤, GUI를 새로고침하거나 API를 호출하세요.</p>
+        {% endif %}
+      </div>
     </div>
-    <div class="row" style="gap:8px; align-items:flex-start;">
-      <input id="discFields" placeholder="fields (comma separated)" style="flex:2; min-width:240px;" />
-      <input id="discSize" type="number" min="1" step="1" value="100" style="width:100px;" />
-      <input id="discFilters" placeholder='filters JSON e.g. {"agent.id":"001"}' style="flex:2; min-width:300px;" />
-      <button class="btn btn-primary" onclick="getDiscover()">/discover/search</button>
-    </div>
-    <pre id="discoverOut">(empty)</pre>
-  </div>
+  </section>
 
   <script>
-    async function getDiscover(){
-      function q(id){ return document.getElementById(id); }
-      const qv = q('discQuery').value || '';
-      const idx = q('discIndex').value || '';
-      const tf = q('discFrom').value || '';
-      const tt = q('discTo').value || '';
-      const size = q('discSize').value || '';
-      const fields = q('discFields').value || '';
-      const sort = '@timestamp:desc';
-      const filters = q('discFilters').value || '';
-      const out = q('discoverOut');
-      out.textContent = 'requesting...';
-      try{
-        const url = new URL(window.location.origin + '/discover/search');
-        if(qv) url.searchParams.set('q', qv);
-        if(idx) url.searchParams.set('index', idx);
-        if(tf) url.searchParams.set('from', tf);
-        if(tt) url.searchParams.set('to', tt);
-        if(size) url.searchParams.set('size', size);
-        if(fields) url.searchParams.set('fields', fields);
-        if(filters) url.searchParams.set('filters', filters);
-        if(sort) url.searchParams.set('sort', sort);
-        const res = await fetch(url, { credentials: 'same-origin' });
-        const data = await res.json();
-        out.textContent = JSON.stringify(data, null, 2);
-      }catch(e){
-        out.textContent = 'error: ' + (e && e.message ? e.message : e);
+    function basWazuh(){
+      return {
+        loading:false,
+        health:{ plugin:'unknown', wazuh_manager:'unknown', wazuh_indexer:'unknown', authenticated:false },
+        state:{
+          selectedOp: '{{ selected_op_id }}',
+          windowSec: Number('{{ time_window_sec }}') || 60,
+          starting:false, loadingDet:false,
+          startOut:'', detectOut:'',
+          loadingIdx:false, loadingDisc:false,
+          discOut:''
+        },
+        disc:{ q:'', index:'', frm:'', to:'', fields:'', size:100 },
+        indices:[],
+        idxHint:'인덱스 목록을 불러오려면 [인덱스] 버튼을 누르세요.',
+        get downloadHref(){
+          const op = encodeURIComponent(this.state.selectedOp||'');
+          const win = encodeURIComponent(this.state.windowSec||'');
+          return `/plugin/bas_wazuh/download?op_id=${op}&window=${win}`;
+        },
+        get guiHref(){
+          const op = encodeURIComponent(this.state.selectedOp||'');
+          const win = encodeURIComponent(this.state.windowSec||'');
+          return `/plugin/bas_wazuh/gui?op_id=${op}&window=${win}`;
+        },
+        async refreshAll(){
+          this.loading=true;
+          try{
+            await Promise.all([this.fetchHealth()]);
+          } finally {
+            this.loading=false;
+          }
+        },
+        openKibana(){ window.open('https://localhost:5601', '_blank'); },
+
+        async fetchHealth(){
+          try{
+            const r = await fetch('/plugin/bastion/health');
+            const j = await r.json();
+            this.health = j || this.health;
+          }catch(e){ console.warn('health error', e); }
+        },
+
+        async startOperation(){
+          if(!this.state.selectedOp){ alert('Operation을 선택하세요'); return; }
+          this.state.starting = true;
+          this.state.startOut = '요청 중...';
+          try{
+            const body = { op_id: this.state.selectedOp };
+            if(this.state.windowSec) body.time_window_sec = Number(this.state.windowSec);
+            const r = await fetch('/operations/start', {
+              method:'POST', headers:{'Content-Type':'application/json'}, credentials:'same-origin',
+              body: JSON.stringify(body)
+            });
+            const j = await r.json();
+            this.state.startOut = JSON.stringify(j, null, 2);
+          }catch(e){ this.state.startOut = '에러: ' + (e?.message || e); }
+          finally{ this.state.starting = false; }
+        },
+
+        async loadDetections(){
+          if(!this.state.selectedOp){ alert('Operation을 선택하세요'); return; }
+          this.state.loadingDet = true;
+          this.state.detectOut = '요청 중...';
+          try{
+            const url = new URL(window.location.origin + '/detections');
+            url.searchParams.set('op_id', this.state.selectedOp);
+            if(this.state.windowSec) url.searchParams.set('time_window_sec', this.state.windowSec);
+            const r = await fetch(url, { credentials:'same-origin' });
+            const j = await r.json();
+            this.state.detectOut = JSON.stringify(j, null, 2);
+          }catch(e){ this.state.detectOut = '에러: ' + (e?.message || e); }
+          finally{ this.state.loadingDet = false; }
+        },
+
+        async downloadJSON(){
+          try{ window.location.href = this.downloadHref; }catch(e){ alert('다운로드 실패: '+(e?.message||e)); }
+        },
+        async reloadGUI(){
+          try{ window.location.href = this.guiHref; }catch(e){ alert('GUI 호출 실패: '+(e?.message||e)); }
+        },
+
+        async loadIndices(){
+          this.state.loadingIdx = true;
+          this.idxHint = '인덱스 목록을 불러오는 중... (최대 10초)';
+          const ac = new AbortController();
+          const tid = setTimeout(()=>ac.abort(), 10000);
+          try{
+            const r = await fetch('/discover/indices', { signal: ac.signal });
+            const j = await r.json();
+            this.indices = (j && Array.isArray(j.indices)) ? j.indices : (j || []);
+            this.idxHint = this.indices.length ? `${this.indices.length}개 인덱스 로드됨` : '인덱스가 없습니다.';
+          }catch(e){
+            this.idxHint = '인덱스 조회 실패: ' + (e?.message || e);
+          }finally{
+            clearTimeout(tid);
+            this.state.loadingIdx = false;
+          }
+        },
+
+        async discoverSearch(){
+          this.state.loadingDisc = true;
+          this.state.discOut = 'requesting...';
+          try{
+            const url = new URL(window.location.origin + '/discover/search');
+            const s = this.disc;
+            if(s.q) url.searchParams.set('q', s.q);
+            if(s.index) url.searchParams.set('index', s.index);
+            if(s.frm) url.searchParams.set('from', s.frm);
+            if(s.to) url.searchParams.set('to', s.to);
+            if(s.fields) url.searchParams.set('fields', s.fields);
+            if(s.size) url.searchParams.set('size', String(s.size));
+            url.searchParams.set('sort', '@timestamp:desc');
+            const r = await fetch(url, { credentials:'same-origin' });
+            const j = await r.json();
+            this.state.discOut = JSON.stringify(j, null, 2);
+          }catch(e){
+            this.state.discOut = 'error: ' + (e?.message || e);
+          }finally{
+            this.state.loadingDisc = false;
+          }
+        },
+
+        init(){
+          // If server preselected, keep it
+          this.refreshAll();
+        }
       }
     }
   </script>
-
 </body>
 </html>
