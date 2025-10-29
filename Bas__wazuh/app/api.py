@@ -5,16 +5,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 from aiohttp import web
 
-from bas_coverage import compute_coverage
+from .coverage import compute_coverage
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def create_router(*, health_getters: Dict[str, callable] | None = None) -> web.RouteTableDef:
-    """Create routes. health_getters may include async callables:
-        {'wazuh_manager': async_fn, 'wazuh_indexer': async_fn, 'authenticated': async_fn}
-    returning strings/bools for status display.
-    """
     routes = web.RouteTableDef()
     health_getters = health_getters or {}
 

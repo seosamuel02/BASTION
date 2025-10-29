@@ -1,6 +1,6 @@
 name = 'BasWazuh'
 description = 'BAS + Wazuh integration'
-address = '/plugins/bas_wazuh'
+address = '/plugin/bas_wazuh'
 
 import json
 from datetime import datetime, timezone
@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from aiohttp import web
 import aiohttp_jinja2
 from app.service.auth_svc import check_authorization
+from .app.api import create_router as create_bas_api_router
+from .app.discover import list_indices as _list_indices
 
 # Robust import: support package, dotted, and flat module contexts
 try:
@@ -136,6 +138,13 @@ async def gui(request: web.Request):
         'error': error,
     }
 
+@check_authorization
+async def operations_list(request):
+
+    services = request.app['bw_services']
+    data_svc = services.get('data_svc')
+    ops = await _list_operations(data_svc)
+    return web.json_response({'ops': ops})
 
 @check_authorization
 async def download(request: web.Request):
@@ -172,6 +181,16 @@ async def download(request: web.Request):
         headers={'Content-Disposition': f'attachment; filename="bw_results_{op_id}.json"'}
     )
 
+
+@check_authorization
+async def discover_indices_api(request: web.Request):
+
+    pattern = request.query.get('pattern') or 'wazuh-*'
+
+
+    data = await _list_indices(pattern)
+    status = 200 if 'indices' in data and 'error' not in data else 400
+    return web.json_response(data, status=status)
 
 async def _health(request: web.Request):
     return web.json_response({"status": "ok", "plugin": "bas_wazuh"}, status=200)
@@ -293,32 +312,46 @@ async def get_detections(request: web.Request):
         'results': results
     })
 
-
 async def enable(services):
     app = services.get('app_svc').application
     app['bw_services'] = services
 
     print("[bas_wazuh] enable() called")
 
-    # Primary iframe path
+    # GUI
     app.router.add_route('GET', '/plugins/bas_wazuh', gui)
 
     # Backward-compatible aliases
     app.router.add_route('GET', '/plugin/bas_wazuh', gui)
     app.router.add_route('GET', '/plugin/bas_wazuh/gui', gui)
     app.router.add_route('GET', '/plugin/bas_wazuh/download', download)
-
     app.router.add_route('GET', '/plugin/bw/gui', gui)
     app.router.add_route('GET', '/plugin/bw/download', download)
 
+    # Health & ping
     app.router.add_route('GET', '/plugin/bas_wazuh/health', _health)
     app.router.add_route('GET', '/bas_test', _ping)
 
-    # API routes
+    # Legacy API (operation/detections/discover)
     app.router.add_route('POST', '/operations/start', start_operation)
     app.router.add_route('GET', '/detections', get_detections)
+    app.router.add_route('GET', '/discover/indices', discover_indices_api)
     app.router.add_route('GET', '/discover/search', discover_search_api)
+    app.router.add_route('GET', '/operations/list', operations_list)
 
+    # New fixed-schema API (/api/*)
+    try:
+        routes = create_bas_api_router(health_getters={
+            'wazuh_manager': lambda: 'healthy',
+            'wazuh_indexer': lambda: 'green',
+            'authenticated': lambda: True,
+        })
+        app.add_routes(routes)
+    except Exception as e:
+        print("[bas_wazuh] /api/* router add failed:", e)
+        raise
+
+    # Route dump
     try:
         for r in app.router.routes():
             print("  [bas_wazuh] ROUTE:", r)
@@ -327,4 +360,3 @@ async def enable(services):
 
     print("[bas_wazuh] enable() finished")
     return True
-

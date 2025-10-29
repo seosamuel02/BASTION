@@ -1,9 +1,3 @@
-# bas_coverage.py (MITRE-from-index version)
-# ------------------------------------------------------------
-# Operation-wide detection aggregation + technique coverage calc
-# NOTE: This version DOES NOT do any rule->MITRE fallback mapping.
-#       It ONLY uses MITRE tags already present in the index documents.
-#
 from __future__ import annotations
 
 import aiohttp
@@ -80,14 +74,14 @@ async def fetch_alerts(indexer_url: str, username: str, password: str, *, index:
     """Query Wazuh Indexer(OpenSearch/ES) for alerts within [start, end]."""
     must_filters = []
     if start is not None and end is not None:
-        must_filters.append({"range": {"timestamp": {"gte": _to_utc(start).isoformat(), "lte": _to_utc(end).isoformat()}}})
+       must_filters.append({"range": {"@timestamp": {"gte": _to_utc(start).isoformat(), "lte": _to_utc(end).isoformat()}}})
 
     q = {
         "query": {"bool": {"filter": must_filters}},
         "size": int(size),
-        "sort": [{"timestamp": {"order": "asc"}}],
+        "sort": [{"@timestamp": {"order": "asc"}}],
         "_source": [
-            "timestamp", "rule.id", "rule.level", "rule.description",
+            "@timestamp", "rule.id", "rule.level", "rule.description",
             "agent.id", "agent.name",
             "data.mitre.technique", "data.mitre.id", "data.mitre.tactic",
             "data", "rule", "mitre", "message",
