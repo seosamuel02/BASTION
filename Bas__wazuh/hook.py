@@ -55,19 +55,24 @@ def _iso(value):
     dt = _to_dt(value)
     return dt.isoformat() if dt else None
 
-
 async def _list_operations(data_svc):
     try:
         ops = await data_svc.locate('operations', {})
     except Exception:
         ops = await data_svc.locate('operation', {})
+
     normalized = []
     for o in ops:
+        start = getattr(o, 'start', None)
+        if isinstance(start, datetime):
+            start = start.replace(tzinfo=timezone.utc).isoformat()
+
         normalized.append({
             'id': str(getattr(o, 'id', '')),
             'name': getattr(o, 'name', '') or str(getattr(o, 'id', '')),
-            'start': getattr(o, 'start', None)
+            'start': start
         })
+
     normalized.sort(key=lambda x: x.get('start') or 0, reverse=True)
     return normalized
 
@@ -138,13 +143,18 @@ async def gui(request: web.Request):
         'error': error,
     }
 
+
 @check_authorization
 async def operations_list(request):
-
     services = request.app['bw_services']
     data_svc = services.get('data_svc')
-    ops = await _list_operations(data_svc)
-    return web.json_response({'ops': ops})
+    try:
+        ops = await _list_operations(data_svc)
+        return web.json_response({'ops': ops})
+    except Exception as e:
+        print("[bas_wazuh] operations_list error:", e)
+        return web.json_response({'error': str(e)}, status=500)
+
 
 @check_authorization
 async def download(request: web.Request):
@@ -184,13 +194,11 @@ async def download(request: web.Request):
 
 @check_authorization
 async def discover_indices_api(request: web.Request):
-
     pattern = request.query.get('pattern') or 'wazuh-*'
-
-
     data = await _list_indices(pattern)
     status = 200 if 'indices' in data and 'error' not in data else 400
     return web.json_response(data, status=status)
+
 
 async def _health(request: web.Request):
     return web.json_response({"status": "ok", "plugin": "bas_wazuh"}, status=200)
@@ -311,6 +319,7 @@ async def get_detections(request: web.Request):
         'time_window_sec': int(engine.match.get('time_window_sec', overrides.get('time_window_sec', 60))),
         'results': results
     })
+
 
 async def enable(services):
     app = services.get('app_svc').application
