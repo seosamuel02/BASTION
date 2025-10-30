@@ -1,8 +1,8 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 
 /* ------------------------
-   공통/기존 상태
+    상태 체크
 ------------------------ */
 const loading = ref(false)
 
@@ -14,18 +14,18 @@ const health = ref({
   authenticated:false
 })
 
-// Operations (서버에서 주입되거나, 추후 동적 주입)
-const ops = ref([])            // [{id,name,start}, ...]가 주입될 수 있음
+// Operations 
+const ops = ref([])
 const selectedOp = ref('')
 const windowSec = ref(60)
 
-// 기존 API 응답 표시
+//  API 응답 표시
 const starting = ref(false)
 const startOut = ref('')
 const loadingDet = ref(false)
 const detectOut = ref('')
 
-// 다운로드/GUI 링크 (기존 경로 유지)
+// 다운로드 링크 
 const downloadHref = computed(() => {
   const op = encodeURIComponent(selectedOp.value || '')
   const win = encodeURIComponent(windowSec.value || '')
@@ -38,13 +38,24 @@ const guiHref = computed(() => {
 })
 
 /* ------------------------
-   KPI 
+   KPI
 ------------------------ */
 const kpi = ref({ operations:0, agents:0, steps:0, detections:0, coverage:0 })
 const lastSeen = ref(null)
 
+// KPI 파생값 & 커버리지 그래프용 상태
+const coveragePct = ref(0)
+const totalAlerts = ref(0)
+const tacticBars = ref([])   // [{ tactic, executed, detected }]
+const barMax = computed(() => {
+  if (!tacticBars.value.length) return 0
+  return Math.max(
+    ...tacticBars.value.map(b => Math.max(Number(b.executed||0), Number(b.detected||0)))
+  )
+})
+
 /* ------------------------
-   Coverage / Dashboard 추가 입력(옵션)
+   Coverage / Dashboard 추가 입력
 ------------------------ */
 const idx = ref({ index:'wazuh-alerts-*', verify_ssl:false })
 const opRange = ref({ start:'', end:'' })
@@ -52,6 +63,8 @@ const outCorr = ref('')
 const outDash = ref('')
 const loadingCorr = ref(false)
 const loadingDash = ref(false)
+const operationChain = ref([])
+const chainOpId = ref(null)
 
 /* ------------------------
    Discover (하단 토글)
@@ -84,13 +97,45 @@ async function fetchHealth(){
   }catch(e){ /* noop */ }
 }
 
+function buildTacticBarsFromCoverage(cov) {
+  const alerts = Array.isArray(cov?.alerts_matched) ? cov.alerts_matched : []
+  // tactic → {techSet:Set, detSet:Set}
+  const bucket = new Map()
+  for (const a of alerts) {
+    const dm = (a?.data || {}).mitre || {}
+    const tval = dm.tactic
+    let tactics = []
+    if (Array.isArray(tval)) tactics = tval
+    else if (tval) tactics = [tval]
+    else tactics = ['(unknown)']
+
+    const tids = Array.isArray(a?.technique_ids) ? a.technique_ids : []
+    const tidSet = new Set(tids.length ? tids : ['(unknown)'])
+
+    for (const t of tactics) {
+      const key = String(t)
+      if (!bucket.has(key)) bucket.set(key, { techSet: new Set(), detSet: new Set() })
+      const ent = bucket.get(key)
+      tidSet.forEach(x => { ent.techSet.add(x); ent.detSet.add(x) })
+    }
+  }
+
+  const rows = []
+  for (const [t, v] of bucket.entries()) {
+    rows.push({ tactic: t, executed: v.techSet.size, detected: v.detSet.size })
+  }
+  rows.sort((a,b)=>a.tactic.localeCompare(b.tactic))
+  tacticBars.value = rows
+}
+
 async function refreshDashboard() {
+  await loadOperationChain()
   const payload = {
     operation: {
       id: selectedOp.value || null,
       start: null,
       end: null,
-      chain: []
+      chain: JSON.parse(JSON.stringify(operationChain.value))
     },
     indexer: {
       index: idx.value.index || 'wazuh-alerts-*',
@@ -106,28 +151,44 @@ async function refreshDashboard() {
   const j = await jsonOrText(r)
   outDash.value = JSON.stringify(j, null, 2)
 
+  // 기본 KPI
   if (j?.kpi) {
     kpi.value.operations = Number(j.kpi.operations ?? 0)
-    kpi.value.detections = Number(j.kpi.alerts_total ?? 0)
-    kpi.value.coverage   = Number(j.kpi.detection_rate ?? 0)
-
-    // agents 추정(알림의 agent.* 기준)
-    try {
-      const set = new Set()
-      ;(j.coverage?.alerts_matched || []).forEach(a=>{
-        const ag = a?.agent
-        if (ag?.name) set.add(ag.name)
-        else if (ag?.id) set.add(ag.id)
-      })
-      kpi.value.agents = set.size
-    } catch { kpi.value.agents = 0 }
-
-    // steps = 의도된 technique 수 (없으면 0)
-    kpi.value.steps = Array.isArray(j.coverage?.correlation?.all_operation_techniques)
-      ? j.coverage.correlation.all_operation_techniques.length : 0
-
-    lastSeen.value = j.coverage?.end_time || j.generated_at || null
   }
+
+  kpi.value.steps = Number(
+    j.coverage?.attack_steps ??
+    j.kpi?.steps ??
+    (Array.isArray(j.coverage?.correlation?.all_operation_techniques)
+      ? j.coverage.correlation.all_operation_techniques.length
+      : 0)
+  )
+
+  kpi.value.detections = Number(j.coverage?.total_alerts ?? 0)
+
+  // agents 
+  try {
+    const set = new Set()
+    ;(j.coverage?.alerts_matched || []).forEach(a=>{
+      const ag = a?.agent
+      if (ag?.name) set.add(ag.name)
+      else if (ag?.id) set.add(ag.id)
+    })
+    kpi.value.agents = set.size
+  } catch { kpi.value.agents = 0 }
+
+  lastSeen.value = j.coverage?.end_time || j.generated_at || null
+
+  // 커버리지 KPI/그래프 파생값
+  const coverageRate = Number(
+    j.coverage?.correlation?.detection_rate ??
+    j.kpi?.detection_rate ?? 0
+  )
+  kpi.value.coverage = coverageRate
+  coveragePct.value = coverageRate
+  totalAlerts.value = Number(j.coverage?.total_alerts ?? 0)
+
+  buildTacticBarsFromCoverage(j.coverage)
 }
 
 async function refreshAll(){
@@ -139,7 +200,24 @@ async function refreshAll(){
 }
 
 /* ------------------------
-   기존: Operation / Detections
+   Operations: 목록 로드
+------------------------ */
+async function loadOps() {
+  try {
+    const r = await fetch('/operations/list', { credentials:'same-origin' })
+    const j = await r.json()
+    ops.value = Array.isArray(j?.ops) ? j.ops : []
+    if (!selectedOp.value && ops.value.length) {
+      selectedOp.value = String(ops.value[0].id)
+    }
+  } catch (e) {
+    console.warn('loadOps error', e)
+    ops.value = []
+  }
+}
+
+/* ------------------------
+  Operation / Detections
 ------------------------ */
 async function startOperation(){
   if(!selectedOp.value){ alert('Operation을 선택하세요'); return; }
@@ -179,9 +257,10 @@ function downloadJSON(){ try{ window.location.href = downloadHref.value }catch(e
 function reloadGUI(){ try{ window.location.href = guiHref.value }catch(e){ alert('GUI 호출 실패: '+(e?.message||e)) } }
 
 /* ------------------------
-   신규: Correlate (필요 시 테스트용)
+  Correlate
 ------------------------ */
 async function callCorrelate(){
+  await loadOperationChain()
   loadingCorr.value = true
   outCorr.value = '요청 중...'
   try{
@@ -191,7 +270,7 @@ async function callCorrelate(){
         name: 'manual',
         start: opRange.value.start || null,
         end: opRange.value.end || null,
-        chain: []
+        chain: JSON.parse(JSON.stringify(operationChain.value))
       },
       indexer: {
         index: idx.value.index || 'wazuh-alerts-*',
@@ -250,13 +329,16 @@ async function discoverSearch(){
 }
 
 /* init */
-onMounted(() => { refreshAll() })
+onMounted(async () => {
+  await loadOps()
+  await refreshAll()
+})
 </script>
 
 <template>
   <div class="p-4">
 
-    <!-- 헤더 / 상단 컨트롤 (기존 스타일 유지) -->
+    <!-- 헤더 / 상단 컨트롤 -->
     <div class="is-flex is-justify-content-space-between is-align-items-center mb-3">
       <div>
         <h1 class="title is-3">CALDERA × Wazuh BAS Dashboard</h1>
@@ -273,7 +355,7 @@ onMounted(() => { refreshAll() })
       </div>
     </div>
 
-    <!-- 필터 바 (검색/작전/OS 등 기존 형태라면 그대로 유지) -->
+    <!-- 필터 바 -->
     <div class="box">
       <div class="columns is-vcentered is-multiline">
         <div class="column is-4">
@@ -300,7 +382,7 @@ onMounted(() => { refreshAll() })
       </div>
     </div>
 
-    <!-- KPI 카드  -->
+    <!-- KPI 카드 -->
     <div class="columns is-multiline">
       <div class="column is-2">
         <div class="box has-text-centered">
@@ -329,10 +411,9 @@ onMounted(() => { refreshAll() })
       <div class="column is-2">
         <div class="box has-text-centered">
           <p class="has-text-grey is-size-7">COVERAGE</p>
-          <p class="is-size-3">{{ coveragePct.toFixed(1) }}%</p>
+          <p class="is-size-3">{{ kpi.coverage.toFixed(1) }}%</p>
           <p class="is-size-7 has-text-grey">alerts: {{ totalAlerts }}</p>
         </div>
-      </div>
       </div>
       <div class="column is-2">
         <div class="box has-text-centered">
@@ -342,31 +423,73 @@ onMounted(() => { refreshAll() })
       </div>
     </div>
 
+    <!-- 그래프 영역 -->
     <div class="grid grid-cols-2 gap-3 mt-4">
-  <!-- ✅ 좌측: Tactic Coverage 그래프 -->
+      <!-- 좌측: Tactic Coverage 그래프 -->
       <div class="rounded-lg p-4 border">
         <div class="text-sm font-semibold mb-2">Tactic Coverage</div>
-
         <div v-if="!tacticBars.length" class="text-xs opacity-60">데이터가 없습니다.</div>
 
         <svg v-else :width="800" height="220" class="block">
-      <!-- SVG 막대그래프 구현부 -->
+          <!-- 좌측/하단 축 -->
+          <line x1="50" y1="10" x2="50" y2="190" stroke="currentColor" opacity="0.2" />
+          <line x1="50" y1="190" x2="780" y2="190" stroke="currentColor" opacity="0.2" />
+
+          <!-- 막대그래프 반복 렌더링 -->
+          <g v-for="(b, i) in tacticBars" :key="i">
+            <template v-if="barMax">
+              <g :transform="`translate(${70 + i * 70},0)`">
+                <!-- Executed -->
+                <rect
+                  :x="0"
+                  :y="190 - Math.round((b.executed / barMax) * 160)"
+                  width="18"
+                  :height="Math.round((b.executed / barMax) * 160)"
+                  rx="3" ry="3" fill="#a0aec0" opacity="0.6"
+                />
+                <!-- Detected -->
+                <rect
+                  :x="22"
+                  :y="190 - Math.round((b.detected / barMax) * 160)"
+                  width="18"
+                  :height="Math.round((b.detected / barMax) * 160)"
+                  rx="3" ry="3" fill="#2563eb" opacity="0.9"
+                />
+                <!-- 값 라벨 -->
+                <text :x="9"  :y="190 - Math.round((b.executed / barMax) * 160) - 4"
+                      font-size="10" text-anchor="middle" fill="#aaa">{{ b.executed }}</text>
+                <text :x="31" :y="190 - Math.round((b.detected / barMax) * 160) - 4"
+                      font-size="10" text-anchor="middle" fill="#2563eb">{{ b.detected }}</text>
+                <!-- tactic 이름 -->
+                <text :x="11" y="206" font-size="10" text-anchor="middle" transform="rotate(45,11,206)">
+                  {{ b.tactic }}
+                </text>
+              </g>
+            </template>
+          </g>
+
+          <!-- 범례 -->
+          <g>
+            <rect x="60" y="10" width="10" height="10" fill="#a0aec0" opacity="0.6" />
+            <text x="75" y="19" font-size="10">Executed</text>
+            <rect x="130" y="10" width="10" height="10" fill="#2563eb" opacity="0.9" />
+            <text x="145" y="19" font-size="10">Detected</text>
+          </g>
         </svg>
 
-        <div class="text-[11px] opacity-60 mt-1">
-        범례: 좌측 = Executed, 우측 = Detected
-        </div>
+        <div class="text-[11px] opacity-60 mt-1">범례: 좌측 = Executed, 우측 = Detected</div>
       </div>
 
-  <!-- ✅ 우측: 기존 Attack vs Detection Timeline 그래프 -->
+      <!-- 우측: (플레이스홀더) Attack vs Detection Timeline -->
       <div class="rounded-lg p-4 border">
-        <AttackTimelineChart />
+        <!-- 컴포넌트가 있다면 활성화하세요 -->
+        <!-- <AttackTimelineChart /> -->
+        <div class="has-text-grey is-size-7">Timeline 차트 영역</div>
       </div>
     </div>
 
-
     <!-- Operation & 탐지 (기존 유지) -->
-    <div class="box">
+    <div class="box" style="margin-top:16px;">
       <div class="is-flex is-justify-content-space-between is-align-items-center">
         <h3 class="title is-5">Operation & 탐지 API</h3>
         <div class="is-size-7">/operations/start, /detections</div>
@@ -414,10 +537,10 @@ onMounted(() => { refreshAll() })
       </div>
     </div>
 
-    <!-- Coverage / Dashboard (테스트용 버튼 섹션; 필요 없으면 숨길 수 있음) -->
+    <!-- Coverage  (테스트용 섹션) -->
     <div class="box">
       <div class="is-flex is-justify-content-space-between is-align-items-center">
-        <h3 class="title is-5">Coverage / Dashboard</h3>
+        <h3 class="title is-5">Coverage </h3>
         <div class="is-size-7">/api/correlate, /api/dashboard/summary</div>
       </div>
 
@@ -503,6 +626,20 @@ onMounted(() => { refreshAll() })
 </template>
 
 <style scoped>
-/* 필요 시 최소 스타일 보완 (Bulma 전제) */
+/* 최소 스타일 (Bulma 전제) */
 pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+.grid { display: grid; }
+.grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.gap-3 { gap: .75rem; }
+.p-4 { padding: 1rem; }
+.rounded-lg { border-radius: .75rem; }
+.border { border: 1px solid rgba(255,255,255,.1); }
+.text-sm { font-size: .875rem; }
+.font-semibold { font-weight: 600; }
+.mb-2 { margin-bottom: .5rem; }
+.text-xs { font-size: .75rem; }
+.opacity-60 { opacity: .6; }
+.block { display: block; }
+.text-\[11px] { font-size: 11px; }
+.mt-1 { margin-top: .25rem; }
 </style>
