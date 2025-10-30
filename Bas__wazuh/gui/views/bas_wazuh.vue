@@ -329,8 +329,10 @@ onMounted(() => { refreshAll() })
       <div class="column is-2">
         <div class="box has-text-centered">
           <p class="has-text-grey is-size-7">COVERAGE</p>
-          <p class="is-size-3">{{ (kpi.coverage || 0).toFixed(1) }}%</p>
+          <p class="is-size-3">{{ coveragePct.toFixed(1) }}%</p>
+          <p class="is-size-7 has-text-grey">alerts: {{ totalAlerts }}</p>
         </div>
+      </div>
       </div>
       <div class="column is-2">
         <div class="box has-text-centered">
@@ -339,6 +341,29 @@ onMounted(() => { refreshAll() })
         </div>
       </div>
     </div>
+
+    <div class="grid grid-cols-2 gap-3 mt-4">
+  <!-- ✅ 좌측: Tactic Coverage 그래프 -->
+      <div class="rounded-lg p-4 border">
+        <div class="text-sm font-semibold mb-2">Tactic Coverage</div>
+
+        <div v-if="!tacticBars.length" class="text-xs opacity-60">데이터가 없습니다.</div>
+
+        <svg v-else :width="800" height="220" class="block">
+      <!-- SVG 막대그래프 구현부 -->
+        </svg>
+
+        <div class="text-[11px] opacity-60 mt-1">
+        범례: 좌측 = Executed, 우측 = Detected
+        </div>
+      </div>
+
+  <!-- ✅ 우측: 기존 Attack vs Detection Timeline 그래프 -->
+      <div class="rounded-lg p-4 border">
+        <AttackTimelineChart />
+      </div>
+    </div>
+
 
     <!-- Operation & 탐지 (기존 유지) -->
     <div class="box">
