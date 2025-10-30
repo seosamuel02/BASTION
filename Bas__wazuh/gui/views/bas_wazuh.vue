@@ -65,6 +65,7 @@ const loadingCorr = ref(false)
 const loadingDash = ref(false)
 const operationChain = ref([])
 const chainOpId = ref(null)
+let pendingDashboardRefresh = false
 
 /* ------------------------
    Discover (하단 토글)
@@ -129,72 +130,83 @@ function buildTacticBarsFromCoverage(cov) {
 }
 
 async function refreshDashboard() {
-  await loadOperationChain()
-  const payload = {
-    operation: {
-      id: selectedOp.value || null,
-      start: null,
-      end: null,
-      chain: JSON.parse(JSON.stringify(operationChain.value))
-    },
-    indexer: {
-      index: idx.value.index || 'wazuh-alerts-*',
-      verify_ssl: !!idx.value.verify_ssl
+  if (loadingDash.value) {
+    pendingDashboardRefresh = true
+    return
+  }
+  loadingDash.value = true
+  try {
+    await loadOperationChain()
+    const payload = {
+      operation: {
+        id: selectedOp.value || null,
+        start: null,
+        end: null,
+        chain: JSON.parse(JSON.stringify(operationChain.value))
+      },
+      indexer: {
+        index: idx.value.index || 'wazuh-alerts-*',
+        verify_ssl: !!idx.value.verify_ssl
+      }
+    }
+    const r = await fetch('/api/dashboard/summary', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',
+      body: JSON.stringify(payload)
+    })
+    const j = await jsonOrText(r)
+    outDash.value = JSON.stringify(j, null, 2)
+
+    if (j?.kpi) {
+      kpi.value.operations = Number(j.kpi.operations ?? 0)
+    }
+
+    kpi.value.steps = Number(
+      j.coverage?.attack_steps ??
+      j.kpi?.steps ??
+      (Array.isArray(j.coverage?.correlation?.all_operation_techniques)
+        ? j.coverage.correlation.all_operation_techniques.length
+        : 0)
+    )
+
+    kpi.value.detections = Number(j.coverage?.total_alerts ?? 0)
+
+    try {
+      const set = new Set()
+      ;(j.coverage?.alerts_matched || []).forEach(a=>{
+        const ag = a?.agent
+        if (ag?.name) set.add(ag.name)
+        else if (ag?.id) set.add(ag.id)
+      })
+      kpi.value.agents = set.size
+    } catch { kpi.value.agents = 0 }
+
+    lastSeen.value = j.coverage?.end_time || j.generated_at || null
+
+    const coverageRate = Number(
+      j.coverage?.correlation?.detection_rate ??
+      j.kpi?.detection_rate ?? 0
+    )
+    kpi.value.coverage = coverageRate
+    coveragePct.value = coverageRate
+    totalAlerts.value = Number(j.coverage?.total_alerts ?? 0)
+
+    buildTacticBarsFromCoverage(j.coverage)
+  } finally {
+    loadingDash.value = false
+    if (pendingDashboardRefresh) {
+      pendingDashboardRefresh = false
+      await refreshDashboard()
     }
   }
-  const r = await fetch('/api/dashboard/summary', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    credentials:'same-origin',
-    body: JSON.stringify(payload)
-  })
-  const j = await jsonOrText(r)
-  outDash.value = JSON.stringify(j, null, 2)
-
-  // 기본 KPI
-  if (j?.kpi) {
-    kpi.value.operations = Number(j.kpi.operations ?? 0)
-  }
-
-  kpi.value.steps = Number(
-    j.coverage?.attack_steps ??
-    j.kpi?.steps ??
-    (Array.isArray(j.coverage?.correlation?.all_operation_techniques)
-      ? j.coverage.correlation.all_operation_techniques.length
-      : 0)
-  )
-
-  kpi.value.detections = Number(j.coverage?.total_alerts ?? 0)
-
-  // agents 
-  try {
-    const set = new Set()
-    ;(j.coverage?.alerts_matched || []).forEach(a=>{
-      const ag = a?.agent
-      if (ag?.name) set.add(ag.name)
-      else if (ag?.id) set.add(ag.id)
-    })
-    kpi.value.agents = set.size
-  } catch { kpi.value.agents = 0 }
-
-  lastSeen.value = j.coverage?.end_time || j.generated_at || null
-
-  // 커버리지 KPI/그래프 파생값
-  const coverageRate = Number(
-    j.coverage?.correlation?.detection_rate ??
-    j.kpi?.detection_rate ?? 0
-  )
-  kpi.value.coverage = coverageRate
-  coveragePct.value = coverageRate
-  totalAlerts.value = Number(j.coverage?.total_alerts ?? 0)
-
-  buildTacticBarsFromCoverage(j.coverage)
 }
 
 async function refreshAll(){
   loading.value = true
   try{
     await fetchHealth()
+    await loadOperationChain()
     await refreshDashboard()
   } finally { loading.value = false }
 }
@@ -216,6 +228,66 @@ async function loadOps() {
   }
 }
 
+async function loadOperationChain(opId = selectedOp.value, force = false) {
+  if (!opId) {
+    operationChain.value = []
+    chainOpId.value = null
+    return
+  }
+  if (!force && chainOpId.value === opId && operationChain.value.length) {
+    return
+  }
+  try {
+    const body = { op_id: opId }
+    if (windowSec.value) body.time_window_sec = Number(windowSec.value)
+    const resp = await fetch('/operations/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body)
+    })
+    if (!resp.ok) {
+      throw new Error(`operations/start ${resp.status}`)
+    }
+    const data = await resp.json()
+    const events = Array.isArray(data?.events) ? data.events : []
+    const mapped = events.map(ev => {
+      const finish = ev?.executed_at || ev?.timestamp || null
+      return {
+        id: ev?.link_id || ev?.id || '',
+        link_id: ev?.link_id || ev?.id || '',
+        technique_id: ev?.technique_id ||
+          (ev?.ability && ev.ability.technique_id) || null,
+        ability: {
+          technique_id: ev?.technique_id || null,
+          name: ev?.ability_name || ''
+        },
+        ability_name: ev?.ability_name || '',
+        finish,
+        start: ev?.start || null,
+        executed_at: ev?.executed_at || null
+      }
+    }).filter(item => item.finish !== null && item.finish !== undefined)
+    operationChain.value = mapped
+    chainOpId.value = opId
+  } catch (e) {
+    console.warn('loadOperationChain error', e)
+    operationChain.value = []
+    chainOpId.value = null
+  }
+}
+
+watch(selectedOp, async () => {
+  operationChain.value = []
+  chainOpId.value = null
+  await refreshDashboard()
+})
+
+watch(windowSec, async () => {
+  chainOpId.value = null
+  await refreshDashboard()
+})
+
 /* ------------------------
   Operation / Detections
 ------------------------ */
@@ -232,6 +304,8 @@ async function startOperation(){
     })
     const j = await r.json()
     startOut.value = JSON.stringify(j, null, 2)
+    await loadOperationChain(selectedOp.value, true)
+    await refreshDashboard()
   }catch(e){
     startOut.value = '에러: ' + (e?.message || e)
   }finally{ starting.value = false }
@@ -260,10 +334,13 @@ function reloadGUI(){ try{ window.location.href = guiHref.value }catch(e){ alert
   Correlate
 ------------------------ */
 async function callCorrelate(){
-  await loadOperationChain()
+  if (loadingCorr.value) {
+    return
+  }
   loadingCorr.value = true
   outCorr.value = '요청 중...'
   try{
+    await loadOperationChain()
     const payload = {
       operation: {
         id: selectedOp.value || null,

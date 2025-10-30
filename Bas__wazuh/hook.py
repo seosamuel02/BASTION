@@ -4,12 +4,15 @@ address = '/plugin/bas_wazuh'
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from aiohttp import web
 import aiohttp_jinja2
 from app.service.auth_svc import check_authorization
 from .app.api import create_router as create_bas_api_router
 from .app.discover import list_indices as _list_indices
+
+VUE_ENTRY = Path(__file__).resolve().parent / 'gui' / 'views' / 'bas_wazuh.vue'
 
 # Robust import: support package, dotted, and flat module contexts
 try:
@@ -100,8 +103,10 @@ async def _get_operation_by_id(data_svc, op_id: str):
 # ----------------------
 
 @check_authorization
-@aiohttp_jinja2.template('bas_wazuh.html')
 async def gui(request: web.Request):
+    if VUE_ENTRY.exists():
+        return web.FileResponse(VUE_ENTRY)
+
     services = request.app['bw_services']
     data_svc = services.get('data_svc')
 
@@ -135,13 +140,15 @@ async def gui(request: web.Request):
         error = str(e)
         time_window_sec = 60
 
-    return {
+    context = {
         'ops': ops,
         'selected_op_id': op_id,
         'results': results,
         'time_window_sec': time_window_sec,
         'error': error,
     }
+
+    return aiohttp_jinja2.render_template('bas_wazuh.html', request, context)
 
 
 @check_authorization
