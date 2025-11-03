@@ -1,0 +1,26 @@
+---
+- name: Wazuh → Shuffle Webhook 연동
+  hosts: wazuh
+  become: yes
+  vars:
+    shuffle_webhook_url: "http://{{ hostvars[groups['shuffle'][0]]['ansible_host'] }}:5001/api/v1/hooks/webhook_abc123"
+  tasks:
+    - name: ossec.conf에 Shuffle 통합 추가
+      blockinfile:
+        path: /var/ossec/etc/ossec.conf
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - SHUFFLE"
+        insertafter: "<ossec_config>"
+        block: |
+          <integration>
+            <name>shuffle</name>
+            <hook_url>{{ shuffle_webhook_url }}</hook_url>
+            <level>7</level>
+            <alert_format>json</alert_format>
+          </integration>
+      notify: restart wazuh
+
+  handlers:
+    - name: restart wazuh
+      systemd:
+        name: wazuh-manager
+        state: restarted
