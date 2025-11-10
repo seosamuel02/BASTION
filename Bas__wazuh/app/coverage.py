@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import aiohttp
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Set
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
+# --- Constants (필드명 고정) ---
+TS_FIELD = "@timestamp"
+MITRE_FIELD = "rule.mitre.id"
+AGENT_NAME_FIELD = "agent.name"
+OS_FIELD = "agent.os.platform"
+
+
 # --- Helpers ---
 def _to_utc(dt: Any) -> datetime:
-    """Coerce naive/aware datetime or str(ISO/epoch) to timezone-aware UTC."""
     if isinstance(dt, datetime):
         if dt.tzinfo is None:
             return dt.replace(tzinfo=timezone.utc)
@@ -25,15 +32,7 @@ def _to_utc(dt: Any) -> datetime:
     raise TypeError(f'Unsupported datetime type: {type(dt)}')
 
 
-def _maybe_to_utc(dt: Any) -> Optional[datetime]:
-    """Return UTC datetime when value is provided, otherwise None."""
-    if dt is None:
-        return None
-    return _to_utc(dt)
-
-
 def _extract_operation_techniques(chain: Iterable[Dict[str, Any]]) -> Set[str]:
-    """Collect technique_id from chain items when provided by operation logs."""
     techs: Set[str] = set()
     for link in chain or []:
         t = (
@@ -84,13 +83,12 @@ async def fetch_alerts(
     username: str,
     password: str,
     *,
-    index: str = 'wazuh-alerts-*',
+    index: str = 'wazuh-alerts-4.x-*',
     start: Any = None,
     end: Any = None,
     verify_ssl: bool = True,
     size: int = 1000
 ) -> List[Dict[str, Any]]:
-    """Query Wazuh Indexer(OpenSearch/ES) for alerts within [start, end]."""
     must_filters = []
     if start is not None and end is not None:
         must_filters.append({
@@ -105,13 +103,12 @@ async def fetch_alerts(
     q = {
         "query": {"bool": {"filter": must_filters}},
         "size": int(size),
-        "sort": [{"@timestamp": {"order": "asc"}}],
+        "sort": [{ "@timestamp": {"order": "asc"} }],
         "_source": [
             "@timestamp", "rule.id", "rule.level", "rule.description",
-            "agent.id", "agent.name",
-            "data.mitre.technique", "data.mitre.id", "data.mitre.tactic",
-            "data", "rule", "mitre", "message",
-            "data.mitre.subtechnique"
+            "rule.mitre.id", "rule.mitre.tactic",
+            "agent.id", "agent.name", "agent.os.platform",
+            "data", "rule", "mitre", "message"
         ]
     }
     timeout = aiohttp.ClientTimeout(total=30)
@@ -119,7 +116,7 @@ async def fetch_alerts(
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         auth = aiohttp.BasicAuth(username, password)
         url = f"{indexer_url.rstrip('/')}/{index}/_search"
-        async with session.get(url, auth=auth, json=q) as resp:
+        async with session.post(url, auth=auth, json=q, headers={"Content-Type":"application/json"}) as resp:
             data = await resp.json()
             if resp.status != 200:
                 raise RuntimeError(f"Indexer query failed: HTTP {resp.status} {data}")
@@ -132,22 +129,21 @@ async def compute_coverage(operation: Dict[str, Any],
 
     op_id = operation.get('id') or operation.get('operation_id')
     name = operation.get('name') or ''
-    start = _maybe_to_utc(operation.get('start'))
-    end = _maybe_to_utc(operation.get('end'))
-    default_window = timedelta(hours=3)
+    start, end = _to_utc(operation.get('start')), _to_utc(operation.get('end'))
+    H = 3 
     now_utc = datetime.now(timezone.utc)
-    if start and not end:
-        end = start + default_window
-    elif end and not start:
-        start = end - default_window
-    elif not start and not end:
+    if start:
+        end = start + timedelta(hours=H)
+    elif end:
+        start = end - timedelta(hours=H)
+    else:
         end = now_utc
-        start = end - default_window
+        start = end - timedelta(hours=H)
 
     duration_seconds = int((end - start).total_seconds()) if end and start else None
 
     # -------------------------------
-    # 1) IntegrationEngine-based correlation
+    # 1) IntegrationEngine 기반 link별 매칭 ( 탐지율)
     # -------------------------------
     engine_result = None
     attack_steps = 0
@@ -155,47 +151,7 @@ async def compute_coverage(operation: Dict[str, Any],
     total_matches = 0
     op_techniques: Set[str] = _extract_operation_techniques(operation.get('chain') or [])
     detected_tids: Set[str] = set()
-    representative_alerts: Dict[str, Dict[str, Any]] = {}
-
-    def _prepare_alert(alert: Dict[str, Any],
-                       fallback_tid: Optional[str] = None) -> tuple[Dict[str, Any], Set[str]]:
-        """Normalise alert payload and extract mapped technique identifiers."""
-        record = dict(alert or {})
-        try:
-            agent = record.get('agent') or {}
-            if isinstance(agent, dict):
-                nm = (agent.get('name') or '').strip().lower()
-                if nm:
-                    agent['name'] = nm
-                    record['agent'] = agent
-        except Exception:
-            pass
-
-        tids = _mitre_ids_from_source(record)
-        if not tids and fallback_tid:
-            tids = {str(fallback_tid)}
-
-        record['technique_ids'] = sorted(tids) if tids else []
-        return record, tids
-
-    def _store_representative(alert: Dict[str, Any],
-                              *,
-                              key_hint: str = '',
-                              fallback_tid: Optional[str] = None) -> None:
-        """Keep the first alert per attack (link) for downstream reporting."""
-        record, tids = _prepare_alert(alert, fallback_tid)
-        detected_tids.update(tids)
-
-        key = key_hint or ''
-        if not key:
-            if record['technique_ids']:
-                joined = '|'.join(record['technique_ids'])
-                key = f"tech:{joined}"
-            else:
-                key = f"alert:{len(representative_alerts)}"
-
-        if key not in representative_alerts:
-            representative_alerts[key] = record
+    enriched_alerts: List[Dict[str, Any]] = []
 
     try:
         parsed = urlparse(indexer['url'])
@@ -217,7 +173,7 @@ async def compute_coverage(operation: Dict[str, Any],
                 'verify_ssl': bool(indexer.get('verify_ssl', True)),
                 'username': indexer.get('username'),
                 'password': indexer.get('password'),
-                'index_pattern': indexer.get('index', 'wazuh-alerts-*'),
+                'index_pattern': indexer.get('index', 'wazuh-alerts-4.x-*'),
             },
             'match': {'time_window_sec': 180}
         })
@@ -246,66 +202,56 @@ async def compute_coverage(operation: Dict[str, Any],
         detected_steps = sum(1 for r in (engine_result or []) if r.get('detected'))
         total_matches = sum(int(r.get('match_count') or 0) for r in (engine_result or []))
 
-        # Analyse correlation output while keeping a single representative alert per link.
-        for result in (engine_result or []):
-            matches = result.get('matches') or []
-            if not matches:
-                continue
-
-            link_id = str(result.get('link_id') or '')
-            fallback_tid = result.get('technique_id')
-            key_hint = f"link:{link_id}" if link_id else ''
-
-            _store_representative(matches[0], key_hint=key_hint, fallback_tid=fallback_tid)
-
-            for match in matches[1:]:
-                _, tids = _prepare_alert(match, fallback_tid)
+        # alerts(매칭건) 모으기 + 기법 집계
+        for r in (engine_result or []):
+            for m in (r.get('matches') or []):
+                b = dict(m)
+                # agent.name 정규화
+                try:
+                    agent = b.get('agent') or {}
+                    if isinstance(agent, dict):
+                        nm = (agent.get('name') or '').strip().lower()
+                        if nm:
+                            agent['name'] = nm
+                            b['agent'] = agent
+                except Exception:
+                    pass
+                tids = _mitre_ids_from_source(b)
                 detected_tids.update(tids)
+                b['technique_ids'] = sorted(tids) if tids else []
+                enriched_alerts.append(b)
     except Exception:
-        # If correlation fails, fall back to raw alert queries
+        # 엔진 매칭 실패 시 enriched_alerts는 아래 fallback에서 채움
         engine_result = None
 
     # -------------------------------
-    # 2) Fallback: derive technique coverage directly from alerts
+    # 2) Fallback: 기간 내 경보에서 기법 추출 
     # -------------------------------
     if engine_result is None:
-        match_windows: List[Any] = operation.get('_match_windows') or []
-        if match_windows:
-            for tech, center_dt, start_dt in match_windows:
-                try:
-                    center = center_dt if isinstance(center_dt, datetime) else _to_utc(center_dt)
-                except Exception:
-                    center = datetime.now(timezone.utc)
-                window_half = timedelta(minutes=5)
-                win_start = center - window_half
-                win_end = center + window_half
-                alerts = await fetch_alerts(
-                    indexer_url=indexer['url'],
-                    username=indexer['username'],
-                    password=indexer['password'],
-                    index=indexer.get('index', 'wazuh-alerts-*'),
-                    start=win_start,
-                    end=win_end,
-                    verify_ssl=indexer.get('verify_ssl', True),
-                    size=200,
-                )
-                for a in alerts:
-                    _store_representative(
-                        a,
-                        fallback_tid=str(tech) if tech else None
-                    )
-
         alerts = await fetch_alerts(
             indexer_url=indexer['url'],
             username=indexer['username'],
             password=indexer['password'],
-            index=indexer.get('index', 'wazuh-alerts-*'),
+            index=indexer.get('index', 'wazuh-alerts-4.x-*'),
             start=start, end=end,
             verify_ssl=indexer.get('verify_ssl', True),
             size=2000
         )
         for a in alerts:
-            _store_representative(a)
+            tids = _mitre_ids_from_source(a)
+            detected_tids.update(tids)
+            b = dict(a)
+            try:
+                agent = b.get('agent') or {}
+                if isinstance(agent, dict):
+                    nm = (agent.get('name') or '').strip().lower()
+                    if nm:
+                        agent['name'] = nm
+                        b['agent'] = agent
+            except Exception:
+                pass
+            b['technique_ids'] = sorted(tids) if tids else []
+            enriched_alerts.append(b)
 
     # -------------------------------
     # 3) 탐지율 계산
@@ -315,8 +261,7 @@ async def compute_coverage(operation: Dict[str, Any],
         det_rate = round((detected_steps / attack_steps) * 100.0, 2)
     else:
         # B) 기법 기준 탐지율 — 엔진이 없거나 체인이 없을 때
-        if not op_techniques:
-            op_techniques = _extract_operation_techniques(operation.get('chain') or [])
+        op_techniques = op_techniques or _extract_operation_techniques(operation.get('chain') or [])
         if op_techniques:
             matched = op_techniques & detected_tids
             undetected = op_techniques - matched
@@ -325,16 +270,6 @@ async def compute_coverage(operation: Dict[str, Any],
             matched = set()
             undetected = set()
             det_rate = 0.0
-
-    # Ensure matched/undetected sets are always defined for the response.
-    if attack_steps > 0:
-        matched = op_techniques & detected_tids if op_techniques else set()
-        undetected = (op_techniques - matched) if op_techniques else set()
-    else:
-        matched = matched if 'matched' in locals() else set()
-        undetected = undetected if 'undetected' in locals() else set()
-
-    enriched_alerts: List[Dict[str, Any]] = list(representative_alerts.values())
 
     return {
         'success': True,
@@ -349,12 +284,16 @@ async def compute_coverage(operation: Dict[str, Any],
         'correlation': {
             'detection_rate': det_rate,
             'total_techniques': len(op_techniques),
-            'detected_techniques': len(matched),
             'all_operation_techniques': sorted(op_techniques),
             'all_detected_techniques': sorted(detected_tids),
-            'matched_techniques': sorted(matched),
-            'undetected_techniques': len(undetected),
-            'undetected_techniques_list': sorted(undetected),
+            **(lambda _m, _u: {
+                'matched_techniques': sorted(_m),
+                'undetected_techniques': len(_u),
+                'undetected_techniques_list': sorted(_u)
+            })(
+                (op_techniques & detected_tids),
+                (op_techniques - (op_techniques & detected_tids)) if op_techniques else set()
+            ),
         },
         'alerts_matched': enriched_alerts,
     }

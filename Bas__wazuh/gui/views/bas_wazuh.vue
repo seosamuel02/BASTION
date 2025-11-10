@@ -1,8 +1,8 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 
 /* ------------------------
-    상태 체크
+   공통/기존 상태
 ------------------------ */
 const loading = ref(false)
 
@@ -14,18 +14,18 @@ const health = ref({
   authenticated:false
 })
 
-// Operations 
-const ops = ref([])
+// Operations (서버에서 주입되거나, 추후 동적 주입)
+const ops = ref([])            // [{id,name,start}, ...]
 const selectedOp = ref('')
 const windowSec = ref(60)
 
-//  API 응답 표시
+// 기존 API 응답 표시
 const starting = ref(false)
 const startOut = ref('')
 const loadingDet = ref(false)
 const detectOut = ref('')
 
-// 다운로드 링크 
+// 다운로드/GUI 링크 (기존 경로 유지)
 const downloadHref = computed(() => {
   const op = encodeURIComponent(selectedOp.value || '')
   const win = encodeURIComponent(windowSec.value || '')
@@ -48,14 +48,17 @@ const coveragePct = ref(0)
 const totalAlerts = ref(0)
 const tacticBars = ref([])   // [{ tactic, executed, detected }]
 const barMax = computed(() => {
-  if (!tacticBars.value.length) return 0
-  return Math.max(
-    ...tacticBars.value.map(b => Math.max(Number(b.executed||0), Number(b.detected||0)))
-  )
+  const vals = (tacticBars.value || []).flatMap(b => {
+    const e = Number.isFinite(+b.executed) ? +b.executed : 0
+    const d = Number.isFinite(+b.detected) ? +b.detected : 0
+    return [e, d]
+  })
+  if (!vals.length) return 0
+  return Math.max(...vals)
 })
 
 /* ------------------------
-   Coverage / Dashboard 추가 입력
+   Coverage / Dashboard (테스트)
 ------------------------ */
 const idx = ref({ index:'wazuh-alerts-*', verify_ssl:false })
 const opRange = ref({ start:'', end:'' })
@@ -63,9 +66,6 @@ const outCorr = ref('')
 const outDash = ref('')
 const loadingCorr = ref(false)
 const loadingDash = ref(false)
-const operationChain = ref([])
-const chainOpId = ref(null)
-let pendingDashboardRefresh = false
 
 /* ------------------------
    Discover (하단 토글)
@@ -80,7 +80,10 @@ const discOut = ref('')
 /* ------------------------
    유틸
 ------------------------ */
-function openKibana(){ window.open('https://localhost:5601','_blank') }
+function openKibana(){
+  const base = (window.__KIBANA_URL__) || 'https://3.38.215.161'
+  window.open(base, '_blank')
+}
 
 async function jsonOrText(res){
   const txt = await res.text()
@@ -98,20 +101,81 @@ async function fetchHealth(){
   }catch(e){ /* noop */ }
 }
 
-function buildTacticBarsFromCoverage(cov) {
-  const alerts = Array.isArray(cov?.alerts_matched) ? cov.alerts_matched : []
-  // tactic → {techSet:Set, detSet:Set}
-  const bucket = new Map()
-  for (const a of alerts) {
-    const dm = (a?.data || {}).mitre || {}
-    const tval = dm.tactic
-    let tactics = []
-    if (Array.isArray(tval)) tactics = tval
-    else if (tval) tactics = [tval]
-    else tactics = ['(unknown)']
+// ---------- helpers: /detections 응답 KPI 유도 ----------
+function _arrayify(v) { return Array.isArray(v) ? v : (v != null ? [v] : []) }
+function countDistinctTechniqueGroups(alerts) {
+  const groups = new Set()
+  for (const a of alerts || []) {
+    let tids = []
+    if (Array.isArray(a?.technique_ids)) tids = a.technique_ids
+    else if (a?.data?.mitre?.id) tids = _arrayify(a.data.mitre.id)
+    else if (a && (a['mitre.id'] != null)) tids = _arrayify(a['mitre.id'])
+    if (!tids.length) tids = ['(unknown)']
+    groups.add(tids.join('|'))
+  }
+  return groups.size
+}
+// /detections 응답 → KPI 도출
+function deriveCoverageKPIFromDetections(detJson, prev = { steps: 0 }) {
+  const cov = (detJson && (detJson.coverage || detJson)) || {}
+  const endTime = cov.end_time || detJson?.end_time || null
 
-    const tids = Array.isArray(a?.technique_ids) ? a.technique_ids : []
-    const tidSet = new Set(tids.length ? tids : ['(unknown)'])
+  let attackSteps =
+  Number(cov.attack_steps ??
+  cov.total_links ??
+   (Array.isArray(cov.correlation?.all_operation_techniques)
+        ? cov.correlation.all_operation_techniques.length
+        : NaN))
+
+  let repAlerts =
+   Number(cov.total_alerts ??
+    cov.alerts_detected ??
+    (Array.isArray(cov.alerts_per_link) ? cov.alerts_per_link.length : NaN))
+  
+  let detectionRate = Number(
+    (cov.correlation && cov.correlation.detection_rate) ?? NaN
+  )
+  if (Number.isFinite(detectionRate) && detectionRate > 0 && detectionRate <= 1) {
+    detectionRate = detectionRate * 100
+    detectionRate = Math.round(detectionRate * 10) / 10
+  }
+
+   if (!Number.isFinite(repAlerts)) {
+    const alertsArr =
+      Array.isArray(detJson) ? detJson :
+      (Array.isArray(detJson?.alerts) ? detJson.alerts : [])
+    repAlerts = countDistinctTechniqueGroups(alertsArr) // 대표 1건/기술 단위
+  }
+  if (!Number.isFinite(attackSteps)) {
+    attackSteps = repAlerts
+  }
+  if (!Number.isFinite(detectionRate)) {
+    detectionRate = attackSteps ? Math.round((repAlerts / attackSteps) * 1000) / 10 : 0
+  }
+  return { attackSteps, repAlerts, detectionRate, endTime }
+}
+
+
+
+  // coverage 응답 → Tactic 막대그래프 집계
+function buildTacticBarsFromCoverage(cov) {
+  if (!cov) { tacticBars.value = []; return }
+  const src = Array.isArray(cov?.alerts_per_link)
+    ? cov.alerts_per_link.map(x => x?.representative_alert || x).filter(Boolean)
+    : (Array.isArray(cov?.alerts_matched) ? cov.alerts_matched : [])
+  if (!src.length) { tacticBars.value = []; return }
+
+  const bucket = new Map() // tactic -> { techSet:Set, detSet:Set }
+  for (const a of src) {
+    const dm = (a?.data?.mitre) || {}
+    const tval = dm.tactic
+    const tactics = Array.isArray(tval) ? tval : (tval ? [tval] : ['(unknown)'])
+
+    let tids = []
+    if (Array.isArray(a?.technique_ids)) tids = a.technique_ids
+    else if (dm.id) tids = Array.isArray(dm.id) ? dm.id : [dm.id]
+    else tids = ['(unknown)']
+    const tidSet = new Set(tids.map(String))
 
     for (const t of tactics) {
       const key = String(t)
@@ -121,92 +185,94 @@ function buildTacticBarsFromCoverage(cov) {
     }
   }
 
-  const rows = []
-  for (const [t, v] of bucket.entries()) {
-    rows.push({ tactic: t, executed: v.techSet.size, detected: v.detSet.size })
-  }
+  const rows = Array.from(bucket.entries()).map(([t, v]) => ({
+    tactic: t, executed: v.techSet.size, detected: v.detSet.size
+  }))
   rows.sort((a,b)=>a.tactic.localeCompare(b.tactic))
   tacticBars.value = rows
 }
 
 async function refreshDashboard() {
-  if (loadingDash.value) {
-    pendingDashboardRefresh = true
-    return
+  const payload = {
+    operation: {
+      id: selectedOp.value || null,
+      start: null,
+      end: null,
+      chain: []
+    },
+    indexer: {
+      index: idx.value.index || 'wazuh-alerts-*',
+      verify_ssl: !!idx.value.verify_ssl
+    }
   }
-  loadingDash.value = true
+  const r = await fetch('/api/dashboard/summary', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    credentials:'same-origin',
+    body: JSON.stringify(payload)
+  })
+  const j = await jsonOrText(r)
+  outDash.value = JSON.stringify(j, null, 2)
+
+  // 기본 KPI
+  if (j?.kpi) {
+    kpi.value.operations = Number(
+    j.kpi.operations ??
+    (Array.isArray(j?.operations) ? j.operations.length : 0)
+  )
+    kpi.value.detections = Number(j.kpi.alerts_total ?? 0)
+  }
+
+  // agents 추정
   try {
-    await loadOperationChain()
-    const payload = {
-      operation: {
-        id: selectedOp.value || null,
-        start: null,
-        end: null,
-        chain: JSON.parse(JSON.stringify(operationChain.value))
-      },
-      indexer: {
-        index: idx.value.index || 'wazuh-alerts-*',
-        verify_ssl: !!idx.value.verify_ssl
-      }
-    }
-    const r = await fetch('/api/dashboard/summary', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      credentials:'same-origin',
-      body: JSON.stringify(payload)
-    })
-    const j = await jsonOrText(r)
-    outDash.value = JSON.stringify(j, null, 2)
-
-    if (j?.kpi) {
-      kpi.value.operations = Number(j.kpi.operations ?? 0)
-    }
-
-    kpi.value.steps = Number(
-      j.coverage?.attack_steps ??
-      j.kpi?.steps ??
-      (Array.isArray(j.coverage?.correlation?.all_operation_techniques)
-        ? j.coverage.correlation.all_operation_techniques.length
-        : 0)
-    )
-
-    kpi.value.detections = Number(j.coverage?.total_alerts ?? 0)
-
-    try {
-      const set = new Set()
-      ;(j.coverage?.alerts_matched || []).forEach(a=>{
+    const set = new Set()
+    if (Array.isArray(j.coverage?.alerts_per_link)) {
+      j.coverage.alerts_per_link.forEach(x => {
+        const rep = x?.representative_alert || x
+        const ag = rep?.agent
+        if (ag?.name) set.add(ag.name)
+        else if (ag?.id) set.add(ag.id)
+      })
+    } else if (Array.isArray(j.coverage?.alerts_matched)) {
+      j.coverage.alerts_matched.forEach(a => {
         const ag = a?.agent
         if (ag?.name) set.add(ag.name)
         else if (ag?.id) set.add(ag.id)
       })
-      kpi.value.agents = set.size
-    } catch { kpi.value.agents = 0 }
-
-    lastSeen.value = j.coverage?.end_time || j.generated_at || null
-
-    const coverageRate = Number(
-      j.coverage?.correlation?.detection_rate ??
-      j.kpi?.detection_rate ?? 0
-    )
-    kpi.value.coverage = coverageRate
-    coveragePct.value = coverageRate
-    totalAlerts.value = Number(j.coverage?.total_alerts ?? 0)
-
-    buildTacticBarsFromCoverage(j.coverage)
-  } finally {
-    loadingDash.value = false
-    if (pendingDashboardRefresh) {
-      pendingDashboardRefresh = false
-      await refreshDashboard()
     }
-  }
+    kpi.value.agents = set.size
+  } catch { kpi.value.agents = 0 }
+
+  // steps =  technique 수(없으면 0)
+  kpi.value.steps = Array.isArray(j.coverage?.correlation?.all_operation_techniques)
+    ? j.coverage.correlation.all_operation_techniques.length : 0
+
+  lastSeen.value = j.coverage?.end_time || j.generated_at || null
+
+  // 커버리지 KPI/그래프 파생값
+  let dr = Number(
+    j.coverage?.correlation?.detection_rate ??
+    j.kpi?.detection_rate ?? 0
+  )
+  // 비율(0~1)인 경우 퍼센트로 보정
+  if (dr > 0 && dr <= 1) dr = dr * 100
+  coveragePct.value = dr
+  kpi.value.coverage = dr
+
+  // total alerts 폴백: alerts_per_link(대표 1건 기준) → alerts_matched
+  totalAlerts.value = Number(
+    j.coverage?.total_alerts ??
+    (Array.isArray(j.coverage?.alerts_per_link) ? j.coverage.alerts_per_link.length :
+     Array.isArray(j.coverage?.alerts_matched) ? j.coverage.alerts_matched.length : 0)
+  )
+
+  buildTacticBarsFromCoverage(j.coverage)
 }
 
 async function refreshAll(){
   loading.value = true
   try{
     await fetchHealth()
-    await loadOperationChain()
     await refreshDashboard()
   } finally { loading.value = false }
 }
@@ -216,9 +282,13 @@ async function refreshAll(){
 ------------------------ */
 async function loadOps() {
   try {
-    const r = await fetch('/operations/list', { credentials:'same-origin' })
+    const r = await fetch('/api/operations', { credentials:'same-origin' })
     const j = await r.json()
-    ops.value = Array.isArray(j?.ops) ? j.ops : []
+    const items = Array.isArray(j) ? j
+                : Array.isArray(j?.items) ? j.items
+                : Array.isArray(j?.ops) ? j.ops
+                : []
+    ops.value = items.map(o => ({ id: o.id || o.operation_id || o.name, name: o.name || o.id, start: o.start }))
     if (!selectedOp.value && ops.value.length) {
       selectedOp.value = String(ops.value[0].id)
     }
@@ -228,68 +298,8 @@ async function loadOps() {
   }
 }
 
-async function loadOperationChain(opId = selectedOp.value, force = false) {
-  if (!opId) {
-    operationChain.value = []
-    chainOpId.value = null
-    return
-  }
-  if (!force && chainOpId.value === opId && operationChain.value.length) {
-    return
-  }
-  try {
-    const body = { op_id: opId }
-    if (windowSec.value) body.time_window_sec = Number(windowSec.value)
-    const resp = await fetch('/operations/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify(body)
-    })
-    if (!resp.ok) {
-      throw new Error(`operations/start ${resp.status}`)
-    }
-    const data = await resp.json()
-    const events = Array.isArray(data?.events) ? data.events : []
-    const mapped = events.map(ev => {
-      const finish = ev?.executed_at || ev?.timestamp || null
-      return {
-        id: ev?.link_id || ev?.id || '',
-        link_id: ev?.link_id || ev?.id || '',
-        technique_id: ev?.technique_id ||
-          (ev?.ability && ev.ability.technique_id) || null,
-        ability: {
-          technique_id: ev?.technique_id || null,
-          name: ev?.ability_name || ''
-        },
-        ability_name: ev?.ability_name || '',
-        finish,
-        start: ev?.start || null,
-        executed_at: ev?.executed_at || null
-      }
-    }).filter(item => item.finish !== null && item.finish !== undefined)
-    operationChain.value = mapped
-    chainOpId.value = opId
-  } catch (e) {
-    console.warn('loadOperationChain error', e)
-    operationChain.value = []
-    chainOpId.value = null
-  }
-}
-
-watch(selectedOp, async () => {
-  operationChain.value = []
-  chainOpId.value = null
-  await refreshDashboard()
-})
-
-watch(windowSec, async () => {
-  chainOpId.value = null
-  await refreshDashboard()
-})
-
 /* ------------------------
-  Operation / Detections
+   Operation / Detections
 ------------------------ */
 async function startOperation(){
   if(!selectedOp.value){ alert('Operation을 선택하세요'); return; }
@@ -304,8 +314,6 @@ async function startOperation(){
     })
     const j = await r.json()
     startOut.value = JSON.stringify(j, null, 2)
-    await loadOperationChain(selectedOp.value, true)
-    await refreshDashboard()
   }catch(e){
     startOut.value = '에러: ' + (e?.message || e)
   }finally{ starting.value = false }
@@ -322,6 +330,20 @@ async function loadDetections(){
     const r = await fetch(url, { credentials:'same-origin' })
     const j = await r.json()
     detectOut.value = JSON.stringify(j, null, 2)
+     const { attackSteps, repAlerts, detectionRate, endTime } =
+     deriveCoverageKPIFromDetections(j, { steps: kpi.value.steps })
+    kpi.value.steps      = attackSteps
+    kpi.value.detections = repAlerts
+    kpi.value.coverage   = detectionRate
+    coveragePct.value    = detectionRate
+    totalAlerts.value    = repAlerts
+    lastSeen.value       = endTime || lastSeen.value
+
+  const covLike = (j && (j.coverage || j)) || {}
+    buildTacticBarsFromCoverage(
+      Array.isArray(covLike.alerts_per_link) || Array.isArray(covLike.alerts_matched)
+        ? covLike : { alerts_matched: (Array.isArray(j) ? j : (j.alerts || [])) }
+    )
   }catch(e){
     detectOut.value = '에러: ' + (e?.message || e)
   }finally{ loadingDet.value = false }
@@ -331,23 +353,19 @@ function downloadJSON(){ try{ window.location.href = downloadHref.value }catch(e
 function reloadGUI(){ try{ window.location.href = guiHref.value }catch(e){ alert('GUI 호출 실패: '+(e?.message||e)) } }
 
 /* ------------------------
-  Correlate
+   Correlate
 ------------------------ */
 async function callCorrelate(){
-  if (loadingCorr.value) {
-    return
-  }
   loadingCorr.value = true
   outCorr.value = '요청 중...'
   try{
-    await loadOperationChain()
     const payload = {
       operation: {
         id: selectedOp.value || null,
         name: 'manual',
         start: opRange.value.start || null,
         end: opRange.value.end || null,
-        chain: JSON.parse(JSON.stringify(operationChain.value))
+        chain: []
       },
       indexer: {
         index: idx.value.index || 'wazuh-alerts-*',
@@ -488,7 +506,7 @@ onMounted(async () => {
       <div class="column is-2">
         <div class="box has-text-centered">
           <p class="has-text-grey is-size-7">COVERAGE</p>
-          <p class="is-size-3">{{ kpi.coverage.toFixed(1) }}%</p>
+          <p class="is-size-3">{{ coveragePct.toFixed(1) }}%</p>
           <p class="is-size-7 has-text-grey">alerts: {{ totalAlerts }}</p>
         </div>
       </div>
@@ -502,70 +520,10 @@ onMounted(async () => {
 
     <!-- 그래프 영역 -->
     <div class="grid grid-cols-2 gap-3 mt-4">
-      <!-- 좌측: Tactic Coverage 그래프 -->
-      <div class="rounded-lg p-4 border">
-        <div class="text-sm font-semibold mb-2">Tactic Coverage</div>
-        <div v-if="!tacticBars.length" class="text-xs opacity-60">데이터가 없습니다.</div>
-
-        <svg v-else :width="800" height="220" class="block">
-          <!-- 좌측/하단 축 -->
-          <line x1="50" y1="10" x2="50" y2="190" stroke="currentColor" opacity="0.2" />
-          <line x1="50" y1="190" x2="780" y2="190" stroke="currentColor" opacity="0.2" />
-
-          <!-- 막대그래프 반복 렌더링 -->
-          <g v-for="(b, i) in tacticBars" :key="i">
-            <template v-if="barMax">
-              <g :transform="`translate(${70 + i * 70},0)`">
-                <!-- Executed -->
-                <rect
-                  :x="0"
-                  :y="190 - Math.round((b.executed / barMax) * 160)"
-                  width="18"
-                  :height="Math.round((b.executed / barMax) * 160)"
-                  rx="3" ry="3" fill="#a0aec0" opacity="0.6"
-                />
-                <!-- Detected -->
-                <rect
-                  :x="22"
-                  :y="190 - Math.round((b.detected / barMax) * 160)"
-                  width="18"
-                  :height="Math.round((b.detected / barMax) * 160)"
-                  rx="3" ry="3" fill="#2563eb" opacity="0.9"
-                />
-                <!-- 값 라벨 -->
-                <text :x="9"  :y="190 - Math.round((b.executed / barMax) * 160) - 4"
-                      font-size="10" text-anchor="middle" fill="#aaa">{{ b.executed }}</text>
-                <text :x="31" :y="190 - Math.round((b.detected / barMax) * 160) - 4"
-                      font-size="10" text-anchor="middle" fill="#2563eb">{{ b.detected }}</text>
-                <!-- tactic 이름 -->
-                <text :x="11" y="206" font-size="10" text-anchor="middle" transform="rotate(45,11,206)">
-                  {{ b.tactic }}
-                </text>
-              </g>
-            </template>
-          </g>
-
-          <!-- 범례 -->
-          <g>
-            <rect x="60" y="10" width="10" height="10" fill="#a0aec0" opacity="0.6" />
-            <text x="75" y="19" font-size="10">Executed</text>
-            <rect x="130" y="10" width="10" height="10" fill="#2563eb" opacity="0.9" />
-            <text x="145" y="19" font-size="10">Detected</text>
-          </g>
-        </svg>
-
-        <div class="text-[11px] opacity-60 mt-1">범례: 좌측 = Executed, 우측 = Detected</div>
-      </div>
-
-      <!-- 우측: (플레이스홀더) Attack vs Detection Timeline -->
-      <div class="rounded-lg p-4 border">
-        <!-- 컴포넌트가 있다면 활성화하세요 -->
-        <!-- <AttackTimelineChart /> -->
-        <div class="has-text-grey is-size-7">Timeline 차트 영역</div>
-      </div>
+      <!--  Coverage 그래프 들어갈곳-->
     </div>
 
-    <!-- Operation & 탐지 (기존 유지) -->
+    <!-- Operation & 탐지 -->
     <div class="box" style="margin-top:16px;">
       <div class="is-flex is-justify-content-space-between is-align-items-center">
         <h3 class="title is-5">Operation & 탐지 API</h3>
@@ -614,10 +572,10 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- Coverage  (테스트용 섹션) -->
+    <!-- Coverage / Dashboard (테스트용 섹션) -->
     <div class="box">
       <div class="is-flex is-justify-content-space-between is-align-items-center">
-        <h3 class="title is-5">Coverage </h3>
+        <h3 class="title is-5">Coverage / Dashboard</h3>
         <div class="is-size-7">/api/correlate, /api/dashboard/summary</div>
       </div>
 
@@ -703,7 +661,6 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-/* 최소 스타일 (Bulma 전제) */
 pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
 .grid { display: grid; }
 .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -717,6 +674,6 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mo
 .text-xs { font-size: .75rem; }
 .opacity-60 { opacity: .6; }
 .block { display: block; }
-.text-\[11px] { font-size: 11px; }
+.text-11px { font-size: 11px; }
 .mt-1 { margin-top: .25rem; }
 </style>

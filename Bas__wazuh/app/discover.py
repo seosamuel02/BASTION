@@ -250,7 +250,7 @@ def discover_search(
     else:
         body['sort'] = [{time_field: {'order': 'desc'}}]
 
-    # 하이라이트(옵션)
+    # 하이라이트
     if highlight:
         body['highlight'] = {"fields": {"message": {}, "full_log": {}}}
 
