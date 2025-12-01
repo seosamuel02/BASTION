@@ -88,8 +88,12 @@ RUN cd /usr/src/app/plugins/sandcat; chmod +x ./update-agents.sh && ./update-age
 RUN cd /usr/src/app/plugins/emu; \
     pip3 install --break-system-packages -r requirements.txt
 
-# Add CWIP plugin to default plugins list
-RUN sed -i '/- sandcat/a\- cwip' /usr/src/app/conf/default.yml
+# Install BASTION plugin dependencies
+RUN cd /usr/src/app/plugins/bastion; \
+    pip3 install --break-system-packages -r requirements.txt
+
+# Add BASTION plugin to default plugins list
+RUN sed -i '/- sandcat/a\- bastion' /usr/src/app/conf/default.yml
 
 STOPSIGNAL SIGINT
 

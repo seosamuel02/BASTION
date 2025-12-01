@@ -1,6 +1,0 @@
-id: bas_wazuh
-name: bas_wazuh
-description: Wazuh detection validation for CALDERA operations
-version: 0.1.0
-address: /plugins/bas_wazuh
-access: red

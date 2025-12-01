@@ -4,7 +4,7 @@ bastion:
   # Wazuh Manager API 설정
   wazuh_manager_url: "https://localhost:55000"
   wazuh_username: "wazuh"
-  wazuh_password: "wazuh"
+  wazuh_password: "MyS3cur3P@ssw0rd!"
 
   # Wazuh Indexer (OpenSearch) 설정
   wazuh_indexer_url: "https://localhost:9200"

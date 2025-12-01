@@ -1,6 +1,9 @@
 # BASTION - Caldera-Wazuh Integration Plugin Configuration
 # 기본 설정은 default.yml을 따르고, BASTION 플러그인을 추가로 활성화
 
+crypt_salt: b8d2f0a3e1c9d7b5a4f3e2d1c9b8a7f6e5d4c3b2a1908f7e6d5c4b3a29180706f
+encryption_key: ADMIN123
+
 # API 키 설정
 api_key_blue: BLUEADMIN123
 api_key_red: REDADMIN123
@@ -23,11 +26,11 @@ users:
 bastion:
   wazuh:
     manager_url: https://wazuh.manager:55000
-    indexer_url: https://wazuh.indexer:9200
+    indexer_url: http://elasticsearch:9200
     manager_username: wazuh
-    manager_password: wazuh
-    indexer_username: admin
-    indexer_password: SecretPassword
+    manager_password: MyS3cur3P@ssw0rd!
+    indexer_username: elastic
+    indexer_password: Kimdong2024
     verify_ssl: false
 
   # 상관관계 엔진 설정

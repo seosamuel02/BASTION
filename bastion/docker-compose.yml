@@ -6,21 +6,18 @@ version: '3.8'
 services:
   # Wazuh Manager
   wazuh.manager:
-    image: wazuh/wazuh-manager:4.9.2
+    image: wazuh/wazuh-manager:4.14.1
     hostname: wazuh.manager
     restart: always
     ports:
-      - "1514:1514"      # Agent communication
+      - "11514:1514"      # Agent communication
       - "1515:1515"      # Agent enrollment
-      - "55000:55000"    # API
+      - "55600:55000"    # API
     environment:
-      - INDEXER_URL=https://wazuh.indexer:9200
-      - INDEXER_USERNAME=admin
-      - INDEXER_PASSWORD=SecretPassword
+      - INDEXER_URL=http://elasticsearch:9200
+      - INDEXER_USERNAME=${ELASTIC_USERNAME}
+      - INDEXER_PASSWORD=${ELASTIC_PASSWORD}
       - FILEBEAT_SSL_VERIFICATION_MODE=full
-      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
-      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
-      - SSL_KEY=/etc/ssl/filebeat.key
       - API_USERNAME=wazuh
       - API_PASSWORD=MyS3cur3P@ssw0rd!
     volumes:
@@ -35,65 +32,49 @@ services:
       - wazuh_wodles:/var/ossec/wodles
       - filebeat_etc:/etc/filebeat
       - filebeat_var:/var/lib/filebeat
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/root-ca-manager.pem:/etc/ssl/root-ca.pem
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/wazuh.manager.pem:/etc/ssl/filebeat.pem
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key
     networks:
       - bastion-network
 
-  # Wazuh Indexer
-  wazuh.indexer:
-    image: wazuh/wazuh-indexer:4.9.2
-    hostname: wazuh.indexer
-    restart: always
-    ports:
-      - "9200:9200"      # Indexer API
+ # Elasticsearch
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
+    container_name: elasticsearch
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -XX:MaxDirectMemorySize=536870912"
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     ulimits:
       memlock:
         soft: -1
         hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
+    ports:
+      - "9200:9200"
     volumes:
-      - wazuh-indexer-data:/var/lib/wazuh-indexer
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/certs/root-ca.pem
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/certs/wazuh.indexer.key
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/certs/wazuh.indexer.pem
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/admin.pem:/usr/share/wazuh-indexer/certs/admin.pem
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/admin-key.pem:/usr/share/wazuh-indexer/certs/admin-key.pem
-      - ./wazuh-docker/single-node/config/wazuh_indexer/wazuh.indexer.yml:/usr/share/wazuh-indexer/opensearch.yml
-      - ./wazuh-docker/single-node/config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/opensearch-security/internal_users.yml
+      - es-data:/usr/share/elasticsearch/data
+      - es-config:/usr/share/elasticsearch/config
     networks:
       - bastion-network
 
-  # Wazuh Dashboard
-  wazuh.dashboard:
-    image: wazuh/wazuh-dashboard:4.9.2
-    hostname: wazuh.dashboard
-    restart: always
-    ports:
-      - "5601:5601"      # Dashboard HTTPS (포트 충돌 해결)
+  # Kibana
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.14.0
+    container_name: kibana
     environment:
-      - INDEXER_USERNAME=admin
-      - INDEXER_PASSWORD=SecretPassword
-      - WAZUH_API_URL=https://wazuh.manager
-      - API_USERNAME=wazuh
-      - API_PASSWORD=MyS3cur3P@ssw0rd!
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_SYSTEM_PASSWORD}
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=0123456789abcdef0123456789abcdef
+      - XPACK_SECURITY_ENCRYPTIONKEY=abcdef0123456789abcdef0123456789
+      - XPACK_REPORTING_ENCRYPTIONKEY=1234567890abcdef1234567890abcdef
+    ports:
+      - "5601:5601"
     depends_on:
-      - wazuh.indexer
-    volumes:
-      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/data/wazuh/config
-      - wazuh-dashboard-custom:/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem
-      - ./wazuh-docker/single-node/config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem
-      - ./wazuh-docker/single-node/config/wazuh_dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
-      - ./wazuh-docker/single-node/config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+      - elasticsearch
     networks:
       - bastion-network
+
 
   # Caldera 5.3.0 with BASTION Plugin
   caldera:
@@ -111,23 +92,26 @@ services:
       - "2222:2222"      # FTP C2
     environment:
       - WAZUH_MANAGER_URL=https://wazuh.manager:55000
-      - WAZUH_INDEXER_URL=https://wazuh.indexer:9200
+      - WAZUH_INDEXER_URL=http://elasticsearch:9200
       - WAZUH_USERNAME=wazuh
       - WAZUH_PASSWORD=MyS3cur3P@ssw0rd!
-      - WAZUH_INDEXER_USERNAME=admin
-      - WAZUH_INDEXER_PASSWORD=SecretPassword
+      - WAZUH_INDEXER_USERNAME=elastic
+      - WAZUH_INDEXER_PASSWORD=Kimdong2024
     volumes:
       # BASTION plugin configuration
       - ./caldera/conf/local.yml:/usr/src/app/conf/local.yml
       - ./caldera/conf/agents.yml:/usr/src/app/conf/agents.yml
       - ./caldera/conf/payloads.yml:/usr/src/app/conf/payloads.yml
+      # BASTION integration engine config
+      - ./caldera/plugins/bastion/app/conf/default.yml:/usr/src/app/plugins/bastion/app/conf/default.yml
       # BASTION plugin source code (for hot-reload development)
-      - ./caldera/plugins/bastion:/usr/src/app/plugins/bastion
+      # - ./caldera/plugins/bastion:/usr/src/app/plugins/bastion
+      # ⚠️ Disabled to preserve opensearch-py installed by Dockerfile
       # Persist Caldera data
       - caldera_data:/usr/src/app/data
     depends_on:
       - wazuh.manager
-      - wazuh.indexer
+      - elasticsearch
     command: ["--insecure"]
     networks:
       - bastion-network
@@ -148,6 +132,8 @@ volumes:
   wazuh-dashboard-config:
   wazuh-dashboard-custom:
   caldera_data:
+  es-data:
+  es-config:
 
 networks:
   bastion-network:

@@ -8,7 +8,15 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from aiohttp import web
+from dateutil import parser as date_parser
 
+# loading integration_engine
+
+try:
+    from .integration_engine import IntegrationEngine
+except Exception:
+    from importlib import import_module
+    IntegrationEngine = import_module('integration_engine').IntegrationEngine
 
 class BASTIONService:
     """Caldera-Wazuh 통합 서비스"""
@@ -22,6 +30,7 @@ class BASTIONService:
         '5402': 'T1078.003',  # Successful sudo to ROOT → Valid Accounts: Local Accounts
 
         # 네트워크 탐지
+        '20101': 'T1046',  # IDS event
         '533': 'T1049',       # netstat ports changed → System Network Connections Discovery
 
         # 시스템 탐지
@@ -42,6 +51,9 @@ class BASTIONService:
         # 프로세스
         '592': 'T1059',       # Process creation → Command and Scripting Interpreter
         '594': 'T1059',       # Process execution → Command and Scripting Interpreter
+        
+        #정찰
+        '92604': 'T1057',
     }
 
     def __init__(self, services: Dict[str, Any], config: Dict[str, Any]):
@@ -66,12 +78,29 @@ class BASTIONService:
         self.indexer_password = config.get('indexer_password', 'SecretPassword')
         self.verify_ssl = config.get('verify_ssl', False)
         self.monitor_interval = config.get('alert_query_interval', 300)
+        #  IntegrationEngine 초기화
+        try:
+            self.log.info("[BASTION] IntegrationEngine 초기화 시작...")
+            overrides = config.get("integration_engine") or {}
+            self.log.info(f"[BASTION] IntegrationEngine overrides: {overrides}")
+            # RULE_MITRE_MAPPING을 IntegrationEngine에 전달
+            self.integration_engine = IntegrationEngine(overrides, rule_mitre_mapping=self.RULE_MITRE_MAPPING)
+            self.log.info("[BASTION] IntegrationEngine 초기화 완료 ✓")
+            self.log.info(f"[BASTION] IntegrationEngine client type: {type(self.integration_engine.client).__name__}")
+            self.log.info(f"[BASTION] Rule-MITRE 매핑: {len(self.RULE_MITRE_MAPPING)}개 규칙")
+        except Exception as e:
+            self.integration_engine = None
+            self.log.error(f"[BASTION] IntegrationEngine 초기화 실패: {e}")
+            import traceback
+            traceback.print_exc()
 
         # 상태 관리
         self.token = None
         self.token_expiry = None
         self.last_alert_time = datetime.utcnow()
         self.is_authenticated = False
+
+        
 
     async def authenticate(self):
         """Wazuh Manager API 인증"""
@@ -140,8 +169,11 @@ class BASTIONService:
                 "size": 100,
                 "sort": [{"timestamp": {"order": "desc"}}],
                 "_source": [
-                    "timestamp", "rule.id", "rule.level", "rule.description",
-                    "agent.id", "agent.name", "data.mitre.technique", "data.mitre.id"
+                "@timestamp","timestamp",
+                "rule.id", "rule.level", "rule.description",
+                "agent.id", "agent.name",
+                "data.mitre", "data.mitre.id", "data.mitre.tactic",
+                "rule.mitre.technique", "rule.mitre.id",
                 ]
             }
 
@@ -166,6 +198,7 @@ class BASTIONService:
 
                         for alert in alerts:
                             source = alert.get('_source', {})
+                            
 
                             # 1. 먼저 알림에서 직접 MITRE 데이터 확인
                             mitre_data = source.get('data', {}).get('mitre', {})
@@ -214,11 +247,15 @@ class BASTIONService:
     async def correlate_operation(self, request: web.Request) -> web.Response:
         """
         Caldera 작전과 Wazuh 알림 상관관계 분석
-
-        Body:
-            operation_id: Caldera 작전 ID
+        (IntegrationEngine 기반으로 operation ↔ detection 매칭)
         """
         try:
+            if not hasattr(self, 'integration_engine') or self.integration_engine is None:
+                return web.json_response({
+                    'success': False,
+                    'error': 'IntegrationEngine not initialized'
+                }, status=500)
+
             data = await request.json()
             operation_id = data.get('operation_id')
 
@@ -228,7 +265,7 @@ class BASTIONService:
                     'error': 'operation_id required'
                 }, status=400)
 
-            # Caldera 작전 조회
+            # 1) Caldera 작전 조회
             operations = await self.data_svc.locate('operations', match={'id': operation_id})
             if not operations:
                 return web.json_response({
@@ -238,23 +275,22 @@ class BASTIONService:
 
             operation = operations[0]
 
-            # 작전 실행 시간 범위 계산 (timezone 안전)
+            # 2) 작전 실행 시간 범위 계산 (timezone 안전)
             start_time = operation.start
             if start_time and start_time.tzinfo:
-                # timezone-aware인 경우 UTC로 변환 후 naive로
                 start_time = start_time.replace(tzinfo=None)
 
             end_time = operation.finish if operation.finish else datetime.utcnow()
             if end_time and end_time.tzinfo:
-                # timezone-aware인 경우 UTC로 변환 후 naive로
                 end_time = end_time.replace(tzinfo=None)
 
-            # 1. 작전에서 실행된 MITRE 기법 추출
+            duration_seconds = int((end_time - start_time).total_seconds())
+
+            # 3) 작전에서 실행된 MITRE 기법 & ability 목록 구성 (기존 로직 유지)
             operation_techniques = set()
             executed_abilities = []
 
             for link in operation.chain:
-                # 각 링크는 실행된 ability를 나타냄
                 ability = link.ability
                 executed_abilities.append({
                     'ability_id': ability.ability_id,
@@ -263,105 +299,72 @@ class BASTIONService:
                     'technique_id': ability.technique_id,
                     'technique_name': ability.technique_name
                 })
-
-                # MITRE 기법 ID 추출 (예: T1059)
                 if ability.technique_id:
                     operation_techniques.add(ability.technique_id)
 
             self.log.info(f'[BASTION] 작전 실행 기법: {operation_techniques}')
 
-            # 2. Wazuh 알림 조회 (작전 시간 범위)
-            duration_seconds = int((end_time - start_time).total_seconds())
-            duration_minutes = max(1, duration_seconds // 60)  # 최소 1분
+            # 4) 🔹 IntegrationEngine을 이용해 링크별 탐지 매칭
+            #    conf/default.yml에 설정된 index, time_window_sec, 필드 매핑들을 사용
+            link_results = await self.integration_engine.correlate(operation)
+            # link_results 각 원소 예시:
+            # {
+            #   'link_id': '...',
+            #   'ability_name': '...',
+            #   'technique_id': 'T1059',
+            #   'executed_at': '2025-11-18T05:10:33Z',
+            #   'detected': True/False,
+            #   'match_count': N,
+            #   'matches': [
+            #       {
+            #         '@timestamp': '2025-11-18T05:10:35Z',
+            #         'rule.id': '592',
+            #         'level': 5,
+            #         'mitre.id': 'T1059',
+            #         'agent.id': '001',
+            #         'agent.name': 'victim-linux-1',
+            #         'description': 'Process creation',
+            #         'full.log': '...'
+            #       }, ...
+            #   ]
+            # }
 
-            # OpenSearch 쿼리
-            query = {
-                "query": {
-                    "bool": {
-                        "must": [
-                            {"range": {"rule.level": {"gte": 3}}},  # 낮은 레벨부터 조회
-                            {
-                                "range": {
-                                    "timestamp": {
-                                        "gte": start_time.isoformat(),
-                                        "lte": end_time.isoformat()
-                                    }
-                                }
-                            }
-                        ]
-                    }
-                },
-                "size": 500,
-                "sort": [{"timestamp": {"order": "asc"}}],
-                "_source": [
-                    "timestamp", "rule.id", "rule.level", "rule.description",
-                    "agent.id", "agent.name", "data.mitre.technique", "data.mitre.id",
-                    "data.mitre.tactic"
-                ]
-            }
-
-            # 3. Wazuh Indexer에서 알림 조회
-            timeout = aiohttp.ClientTimeout(total=30)
-            connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
-
+            # 5) 탐지된 Technique / 매칭된 alert 리스트 계산
             detected_techniques = set()
             alerts_matched = []
 
-            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-                auth = aiohttp.BasicAuth(self.indexer_username, self.indexer_password)
-                async with session.post(
-                    f'{self.indexer_url}/wazuh-alerts-*/_search',
-                    json=query,
-                    auth=auth
-                ) as resp:
-                    if resp.status == 200:
-                        result_data = await resp.json()
-                        alerts = result_data.get('hits', {}).get('hits', [])
+            for lr in link_results:
+                tech = lr.get('technique_id')
+                if tech and lr.get('detected'):
+                    detected_techniques.add(tech)
 
-                        # 알림에서 MITRE 기법 추출
-                        for alert in alerts:
-                            source = alert.get('_source', {})
-                            mitre_data = source.get('data', {}).get('mitre', {})
+                link_id = lr.get('link_id')
+                ability_name = lr.get('ability_name')
 
-                            # MITRE ID 추출 (다양한 형식 지원)
-                            technique_id = None
-                            if isinstance(mitre_data, dict):
-                                technique_id = mitre_data.get('id')
-                            elif isinstance(mitre_data, list):
-                                for item in mitre_data:
-                                    if isinstance(item, dict) and 'id' in item:
-                                        technique_id = item.get('id')
-                                        break
+                for m in lr.get('matches', []):
+                    alerts_matched.append({
+                        # Vue 테이블에서 쓰기 좋은 형태로 필드명 정리
+                        'timestamp': m.get('@timestamp'),
+                        'rule_id': m.get('rule.id'),
+                        'rule_level': m.get('level'),
+                        'description': m.get('description'),
+                        'agent_name': m.get('agent.name'),
+                        'agent_id': m.get('agent.id'),
+                        'technique_id': tech or m.get('mitre.id'),
+                        # 어느 링크/ability에서 나온 탐지인지도 같이 제공
+                        'link_id': link_id,
+                        'ability_name': ability_name,
+                    })
 
-                            # MITRE 데이터가 없으면 규칙 ID 매핑 테이블 사용
-                            if not technique_id:
-                                rule_id = str(source.get('rule', {}).get('id', ''))
-                                technique_id = self.RULE_MITRE_MAPPING.get(rule_id)
-
-                            if technique_id:
-                                detected_techniques.add(technique_id)
-                                alerts_matched.append({
-                                    'timestamp': source.get('timestamp'),
-                                    'rule_id': source.get('rule', {}).get('id'),
-                                    'rule_level': source.get('rule', {}).get('level'),
-                                    'description': source.get('rule', {}).get('description'),
-                                    'agent_name': source.get('agent', {}).get('name'),
-                                    'technique_id': technique_id
-                                })
-
-                    else:
-                        error_text = await resp.text()
-                        self.log.error(f'[BASTION] Indexer 쿼리 실패: {error_text}')
-
-            # 4. 매칭 및 탐지율 계산
+            # 6) 매칭 및 탐지율 계산 (기존 구조 그대로)
             matched_techniques = operation_techniques.intersection(detected_techniques)
             undetected_techniques = operation_techniques - detected_techniques
 
             detection_rate = 0.0
-            if len(operation_techniques) > 0:
+            if operation_techniques:
                 detection_rate = len(matched_techniques) / len(operation_techniques)
 
-            # 5. 상관관계 결과 생성
+            # 7) 최종 상관관계 결과 생성 (기존 response schema 유지 + links 추가)
             correlation_result = {
                 'success': True,
                 'operation_id': operation_id,
@@ -380,11 +383,17 @@ class BASTIONService:
                     'all_detected_techniques': list(detected_techniques)
                 },
                 'executed_abilities': executed_abilities,
+                # 🔹 link별 raw 결과도 내려주면 프론트에서 더 디테일하게 쓸 수 있음
+                'links': link_results,
+                # 🔹 기존 alerts_matched도 그대로 유지 (Vue Detection Table 용)
                 'alerts_matched': alerts_matched,
                 'total_alerts': len(alerts_matched)
             }
 
-            self.log.info(f'[BASTION] 상관관계 분석 완료: 탐지율 {detection_rate:.1%}')
+            self.log.info(
+                f'[BASTION] 상관관계 분석 완료 (IntegrationEngine): '
+                f'탐지율 {detection_rate:.1%}, links={len(link_results)}, alerts={len(alerts_matched)}'
+            )
 
             return web.json_response(correlation_result)
 
@@ -394,6 +403,7 @@ class BASTIONService:
                 'success': False,
                 'error': str(e)
             }, status=500)
+
 
     async def generate_detection_report(self, request: web.Request) -> web.Response:
         """탐지 커버리지 리포트 생성"""
@@ -444,13 +454,15 @@ class BASTIONService:
         try:
             hours = int(request.query.get('hours', 1))
             operation_id_filter = request.query.get('operation_id', '').strip()
-            os_filter = request.query.get('os_filter', '').strip().lower()
+            raw_os = request.query.get('os_filter') or request.query.get('os')
+            os_filter = (raw_os or '').strip().lower()
             search_query = request.query.get('search', '').strip().lower()
 
             self.log.info(f'[BASTION] Agents 조회 요청 (최근 {hours}시간 탐지, op_filter={operation_id_filter}, os={os_filter}, search={search_query})')
 
             # 1. Wazuh Agents 조회 (ID로 인덱싱)
             wazuh_agents_by_id = {}
+            wazuh_agents_by_name = {}
             try:
                 await self._ensure_authenticated()
                 timeout = aiohttp.ClientTimeout(total=10)
@@ -470,9 +482,12 @@ class BASTIONService:
                                     'status': wazuh_agent.get('status'),
                                     'version': wazuh_agent.get('version')
                                 }
-                            self.log.info(f'[BASTION] Wazuh Agents {len(wazuh_agents_by_id)}개 조회')
+                                name_key = (wazuh_agent.get('name') or '').lower()
+                                if name_key: 
+                                   wazuh_agents_by_name[name_key] = wazuh_agents_by_id[agent_id] 
+                            self.log.info(f'[BASTION] Agents {len(wazuh_agents_by_id)}개 조회')
             except Exception as e:
-                self.log.warning(f'[BASTION] Wazuh Agents 조회 실패: {e}')
+                self.log.warning(f'[BASTION] Agents 조회 실패: {e}')
 
             # 2. Caldera Agents 조회
             agents = await self.data_svc.locate('agents')
@@ -512,27 +527,47 @@ class BASTIONService:
                     'detections_count': 0     # Week 11: Agent별 detections 수
                 }
 
-                # Wazuh Agent 매칭 (Facts 기반: wazuh.agent.id trait 사용)
+                # Wazuh Agent 매칭
                 wazuh_agent = None
                 wazuh_agent_id = None
 
-                # Agent의 links에서 facts 추출
+                # 1) 우선: Agent links의 facts에서 wazuh.agent.id 찾기
                 try:
                     if hasattr(agent, 'links') and agent.links:
                         for link in agent.links:
                             if hasattr(link, 'facts') and link.facts:
                                 for fact in link.facts:
                                     if fact.trait == 'wazuh.agent.id':
-                                        wazuh_agent_id = fact.value
-                                        self.log.info(f'[BASTION] Agent {agent.paw}: Wazuh ID {wazuh_agent_id} (Links에서 발견)')
+                                        wazuh_agent_id = str(fact.value).strip()
+                                        self.log.info(
+                                            f'[BASTION] Agent {agent.paw}: '
+                                            f'Wazuh ID {wazuh_agent_id} (links에서 발견)'
+                                        )
                                         break
                             if wazuh_agent_id:
                                 break
-
-                    if not wazuh_agent_id:
-                        self.log.warning(f'[BASTION DEBUG] Agent {agent.paw}: No wazuh.agent.id fact found in links')
                 except Exception as e:
                     self.log.error(f'[BASTION] Error getting facts for agent {agent.paw}: {e}')
+
+                # 2) Fallback: Caldera agent.host == Wazuh agent.name 이면 매핑
+                if not wazuh_agent_id and agent.host:
+                    host_key = (agent.host or '').lower()
+                    fallback = wazuh_agents_by_name.get(host_key)
+                    if fallback:
+                        wazuh_agent_id = fallback.get('id')
+                        self.log.info(
+                            f'[BASTION DEBUG] Agent {agent.paw}: '
+                            f'host="{agent.host}" 기반 Wazuh 매핑 → '
+                            f'{wazuh_agent_id} ({fallback.get("name")})'
+                        )
+
+                # 3) 둘 다 실패하면 경고만 남김
+                if not wazuh_agent_id:
+                    self.log.warning(
+                        f'[BASTION DEBUG] Agent {agent.paw}: '
+                        f'Wazuh 매핑 실패 (facts/host 모두 불일치)'
+                    )
+
 
                 # Wazuh agent 정보 조회
                 if wazuh_agent_id:
@@ -558,8 +593,11 @@ class BASTIONService:
                         "size": 10,
                         "sort": [{"timestamp": {"order": "desc"}}],
                         "_source": [
-                            "timestamp", "rule.id", "rule.level", "rule.description",
-                            "data.mitre.id", "data.mitre.tactic", "agent.name", "agent.ip"
+                        "@timestamp", "timestamp",
+                        "rule.id", "rule.level", "rule.description",
+                        "data.mitre", "data.mitre.id", "data.mitre.tactic",
+                        "rule.mitre.technique", "rule.mitre.id",
+                        "agent.name", "agent.ip"
                         ]
                     }
 
@@ -589,9 +627,10 @@ class BASTIONService:
                                         if not technique_id:
                                             rule_id = str(source.get('rule', {}).get('id', ''))
                                             technique_id = self.RULE_MITRE_MAPPING.get(rule_id)
-
+                                        
+                                        ts = source.get('@timestamp') or source.get('timestamp')
                                         agent_info['recent_detections'].append({
-                                            'timestamp': source.get('timestamp'),
+                                            'timestamp': ts,
                                             'rule_id': source.get('rule', {}).get('id'),
                                             'rule_level': source.get('rule', {}).get('level'),
                                             'description': source.get('rule', {}).get('description'),
@@ -602,7 +641,6 @@ class BASTIONService:
                         self.log.warning(f'[BASTION] Agent {agent.paw} 탐지 조회 실패: {e}')
                         # 에러가 나도 agent 정보는 반환
 
-                # Week 11: Agent 통계 계산
                 # 1. Detections count (recent_detections 길이)
                 agent_info['detections_count'] = len(agent_info['recent_detections'])
 
@@ -627,7 +665,12 @@ class BASTIONService:
 
                 # OS Filter 적용
                 if os_filter:
-                    if os_filter not in agent.platform.lower():
+                    platform = (agent.platform or '').lower()
+                    self.log.debug(
+                        f'[BASTION DEBUG] OS filter check: agent={agent.paw}, '
+                        f'platform="{platform}", os_filter="{os_filter}"'
+                    )
+                    if os_filter not in platform:
                         continue
 
                 # Search Filter 적용
@@ -731,169 +774,194 @@ class BASTIONService:
             hours = int(request.query.get('hours', 24))
             min_level = int(request.query.get('min_level', 5))
             operation_id_filter = request.query.get('operation_id', '').strip()
-            os_filter = request.query.get('os_filter', '').strip().lower()
+            raw_os = request.query.get('os_filter') or request.query.get('os')
+            os_filter = (raw_os or '').strip().lower()
             search_query = request.query.get('search', '').strip().lower()
 
-            self.log.info(f'[BASTION] 대시보드 요약 조회: 최근 {hours}시간 (op_filter={operation_id_filter}, os_filter={os_filter}, search={search_query})')
+            self.log.info(
+                f'[BASTION] 대시보드 요약 조회: 최근 {hours}시간 '
+                f'(op_filter={operation_id_filter}, os_filter={os_filter}, search={search_query})'
+            )
 
             # 1. Operations 목록 조회 (Caldera)
             all_operations = await self.data_svc.locate('operations')
             all_agents = await self.data_svc.locate('agents')  # 모든 agents 조회
 
-            # 최근 N시간 내 작전 필터링
             cutoff_time = datetime.utcnow() - timedelta(hours=hours)
             operations_data = []
+            filtered_ops: List[Any] = []
             total_attack_steps = 0
             operation_techniques = set()  # 전체 작전에서 실행된 기법
 
-            self.log.error(f'[BASTION DEBUG] Total operations: {len(all_operations)}, cutoff_time: {cutoff_time}')
+            self.log.error(
+                f'[BASTION DEBUG] Total operations: {len(all_operations)}, cutoff_time: {cutoff_time}'
+            )
+
             for op in all_operations:
-                # Operation ID 필터 적용
+                # 1) Operation ID 필터
                 if operation_id_filter and op.id != operation_id_filter:
                     continue
 
-                # 최근 N시간 내 시작된 작전만 포함 (timezone 안전 비교)
-                if op.start:
+                # 2) 시간 필터: operation_id_filter가 없을 때만 적용
+                include_by_time = True
+                op_start = None
+
+                if not operation_id_filter and op.start:
                     op_start = op.start.replace(tzinfo=None) if op.start.tzinfo else op.start
-                    self.log.warning(f'[BASTION DEBUG] Operation {op.name}: op_start={op_start}, passes filter: {op_start >= cutoff_time}')
-                    if op_start >= cutoff_time:
-                        # 작전 실행 단계 추출
-                        attack_steps = []
-                        op_techniques = set()
+                    if isinstance(op_start, datetime) and op_start < cutoff_time:
+                        include_by_time = False
 
+                if not include_by_time:
+                    continue
+
+                # 3) 작전 실행 단계 추출
+                attack_steps = []
+                op_techniques = set()
+
+                for link in op.chain:
+                    ability = link.ability
+                    # link.finish가 datetime 객체인 경우 isoformat 변환, 문자열인 경우 그대로 사용
+                    finish_time = None
+                    if link.finish:
+                        if isinstance(link.finish, str):
+                            finish_time = link.finish
+                        else:
+                            finish_time = link.finish.isoformat()
+
+                    attack_steps.append({
+                        'ability_id': ability.ability_id,
+                        'name': ability.name,
+                        'tactic': ability.tactic,
+                        'technique_id': ability.technique_id,
+                        'technique_name': ability.technique_name,
+                        'timestamp': finish_time,
+                        'paw': link.paw  # Agent ID 추가 (OS filter용)
+                    })
+
+                    if ability.technique_id:
+                        op_techniques.add(ability.technique_id)
+                        operation_techniques.add(ability.technique_id)
+
+                total_attack_steps += len(attack_steps)
+
+                # Agent PAWs와 platforms 매핑
+                agent_paws = []
+                agent_platforms = {}
+
+                # attack_steps의 모든 PAW를 먼저 수집
+                attack_step_paws = set(step['paw'] for step in attack_steps)
+                self.log.warning(
+                    f'[BASTION DEBUG] Operation {op.name}: attack_step_paws = {attack_step_paws}'
+                )
+
+                # 각 PAW의 platform을 all_agents 또는 op.agents/chain에서 찾기
+                for paw in attack_step_paws:
+                    found = False
+
+                    # 1. all_agents에서 찾기
+                    for agent in all_agents:
+                        if agent.paw == paw:
+                            agent_platforms[paw] = agent.platform
+                            agent_paws.append(paw)
+                            found = True
+                            break
+
+                    # 2. op.agents에서 찾기 (all_agents에 없는 경우)
+                    if not found:
+                        for agent in op.agents:
+                            if agent.paw == paw:
+                                agent_platforms[paw] = agent.platform
+                                agent_paws.append(paw)
+                                found = True
+                                break
+
+                    # 3. executor로 platform 유추
+                    if not found:
                         for link in op.chain:
-                            ability = link.ability
-                            # link.finish가 datetime 객체인 경우 isoformat 변환, 문자열인 경우 그대로 사용
-                            finish_time = None
-                            if link.finish:
-                                if isinstance(link.finish, str):
-                                    finish_time = link.finish
+                            if link.paw == paw and link.executor:
+                                executor_name = link.executor.name
+                                if executor_name in ['sh', 'bash']:
+                                    agent_platforms[paw] = 'linux'
+                                elif executor_name in ['cmd', 'psh', 'powershell']:
+                                    agent_platforms[paw] = 'windows'
+                                elif executor_name == 'osascript':
+                                    agent_platforms[paw] = 'darwin'
                                 else:
-                                    finish_time = link.finish.isoformat()
+                                    agent_platforms[paw] = 'linux'
+                                agent_paws.append(paw)
+                                self.log.warning(
+                                    f'[BASTION DEBUG] Inferred {paw} from executor '
+                                    f'{executor_name}: {agent_platforms[paw]}'
+                                )
+                                break
 
-                            attack_steps.append({
-                                'ability_id': ability.ability_id,
-                                'name': ability.name,
-                                'tactic': ability.tactic,
-                                'technique_id': ability.technique_id,
-                                'technique_name': ability.technique_name,
-                                'timestamp': finish_time,
-                                'paw': link.paw  # Agent ID 추가 (OS filter용)
-                            })
+                    if not found and paw not in agent_platforms:
+                        self.log.warning(
+                            f'[BASTION DEBUG] FAILED to find platform for PAW {paw}'
+                        )
 
-                            if ability.technique_id:
-                                op_techniques.add(ability.technique_id)
-                                operation_techniques.add(ability.technique_id)
+                # OS Filter 적용 (agent_platforms 중 하나라도 매칭되면 포함)
+                if os_filter:
+                    platform_match = any(
+                        os_filter in (platform or '').lower()
+                        for platform in agent_platforms.values()
+                    )
+                    if not platform_match:
+                        self.log.info(
+                            f'[BASTION] Operation {op.name} 스킵: OS filter 미매칭 ({os_filter})'
+                        )
+                        continue
 
-                        total_attack_steps += len(attack_steps)
+                # Search Filter 적용 (작전명, agent PAW, technique 검색)
+                if search_query:
+                    search_match = False
+                    # 작전명 검색
+                    if search_query in (op.name or '').lower():
+                        search_match = True
+                    # Agent PAW 검색
+                    for paw in agent_paws:
+                        if search_query in (paw or '').lower():
+                            search_match = True
+                            break
+                    # Technique ID 검색
+                    for tech_id in op_techniques:
+                        if search_query in tech_id.lower():
+                            search_match = True
+                            break
+                    if not search_match:
+                        self.log.info(
+                            f'[BASTION] Operation {op.name} 스킵: search 미매칭 ({search_query})'
+                        )
+                        continue
 
-                        # Agent PAWs와 platforms 매핑
-                        # attack_steps에 사용된 모든 PAW의 platform을 매핑
-                        agent_paws = []
-                        agent_platforms = {}
+                # started/finished 처리 (datetime 또는 str)
+                started = op.start.isoformat() if isinstance(op.start, datetime) else op.start
+                finished = None
+                if op.finish:
+                    finished = op.finish.isoformat() if isinstance(op.finish, datetime) else op.finish
 
-                        # attack_steps의 모든 PAW를 먼저 수집
-                        attack_step_paws = set(step['paw'] for step in attack_steps)
-                        self.log.warning(f'[BASTION DEBUG] Operation {op.name}: attack_step_paws = {attack_step_paws}')
-
-                        # 각 PAW의 platform을 all_agents 또는 op.chain의 link에서 찾기
-                        for paw in attack_step_paws:
-                            # 1. all_agents에서 찾기
-                            found = False
-                            for agent in all_agents:
-                                if agent.paw == paw:
-                                    agent_platforms[paw] = agent.platform
-                                    agent_paws.append(paw)
-                                    found = True
-                                    break
-
-                            # 2. op.agents에서 찾기 (all_agents에 없는 경우)
-                            if not found:
-                                for agent in op.agents:
-                                    if agent.paw == paw:
-                                        agent_platforms[paw] = agent.platform
-                                        agent_paws.append(paw)
-                                        found = True
-                                        break
-
-                            # 3. executor로 platform 유추
-                            if not found:
-                                for link in op.chain:
-                                    if link.paw == paw and link.executor:
-                                        executor_name = link.executor.name
-                                        if executor_name in ['sh', 'bash']:
-                                            agent_platforms[paw] = 'linux'
-                                        elif executor_name in ['cmd', 'psh', 'powershell']:
-                                            agent_platforms[paw] = 'windows'
-                                        elif executor_name == 'osascript':
-                                            agent_platforms[paw] = 'darwin'
-                                        else:
-                                            agent_platforms[paw] = 'linux'
-                                        agent_paws.append(paw)
-                                        self.log.warning(f'[BASTION DEBUG] Inferred {paw} from executor {executor_name}: {agent_platforms[paw]}')
-                                        break
-
-                            if not found and paw not in agent_platforms:
-                                self.log.warning(f'[BASTION DEBUG] FAILED to find platform for PAW {paw}')
-
-                        # OS Filter 적용 (agent_platforms 중 하나라도 매칭되면 포함)
-                        if os_filter:
-                            platform_match = False
-                            for platform in agent_platforms.values():
-                                if os_filter in platform.lower():
-                                    platform_match = True
-                                    break
-                            if not platform_match:
-                                self.log.info(f'[BASTION] Operation {op.name} 스킵: OS filter 미매칭 ({os_filter})')
-                                continue
-
-                        # Search Filter 적용 (작전명, agent PAW, technique 검색)
-                        if search_query:
-                            search_match = False
-                            # 작전명 검색
-                            if search_query in op.name.lower():
-                                search_match = True
-                            # Agent PAW 검색
-                            for paw in agent_paws:
-                                if search_query in paw.lower():
-                                    search_match = True
-                                    break
-                            # Technique ID/Name 검색
-                            for tech_id in op_techniques:
-                                if search_query in tech_id.lower():
-                                    search_match = True
-                                    break
-                            if not search_match:
-                                self.log.info(f'[BASTION] Operation {op.name} 스킵: search 미매칭 ({search_query})')
-                                continue
-
-                        # started/finished 처리 (datetime 또는 str)
-                        started = None
-                        if op.start:
-                            started = op.start.isoformat() if isinstance(op.start, datetime) else op.start
-
-                        finished = None
-                        if op.finish:
-                            finished = op.finish.isoformat() if isinstance(op.finish, datetime) else op.finish
-
-                        operations_data.append({
-                            'id': op.id,
-                            'name': op.name,
-                            'state': op.state,
-                            'started': started,
-                            'finished': finished,
-                            'attack_steps': attack_steps,
-                            'techniques': list(op_techniques),
-                            'agent_count': len(op.agents),
-                            'agent_paws': agent_paws,  # Agent PAW 목록 (OS filter용)
-                            'agent_platforms': agent_platforms  # PAW -> Platform 매핑
-                        })
+                operations_data.append({
+                    'id': op.id,
+                    'name': op.name,
+                    'state': op.state,
+                    'started': started,
+                    'finished': finished,
+                    'attack_steps': attack_steps,
+                    'techniques': list(op_techniques),
+                    'agent_count': len(op.agents),
+                    'agent_paws': agent_paws,          # Agent PAW 목록 (OS filter용)
+                    'agent_platforms': agent_platforms  # PAW -> Platform 매핑
+                })
+                filtered_ops.append(op)
 
             # 2. Wazuh Agent 정보 조회 (agent_id -> OS 매핑)
             wazuh_agent_os_map = {}
             timeout = aiohttp.ClientTimeout(total=30)
 
-            async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(ssl=self.verify_ssl)) as session:
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                connector=aiohttp.TCPConnector(ssl=self.verify_ssl)
+            ) as session:
                 # Wazuh Manager API에서 JWT 토큰 획득
                 auth = aiohttp.BasicAuth(self.username, self.password)
                 async with session.post(
@@ -919,27 +987,81 @@ class BASTIONService:
                                         wazuh_agent_os_map[agent_id] = agent_os
 
             # 3. Wazuh 탐지 이벤트 조회
+            # 오퍼레이션 필터가 있을 때는 해당 작전의 실행 시간 범위로 쿼리
+            time_range_query = {}
+
+            if operation_id_filter and filtered_ops:
+                # 필터링된 오퍼레이션의 시작~종료 시간 범위 계산
+                op_start_times = []
+                op_end_times = []
+
+                for op in filtered_ops:
+                    if op.start:
+                        op_start = op.start.replace(tzinfo=None) if op.start.tzinfo else op.start
+                        op_start_times.append(op_start)
+
+                    if op.finish:
+                        op_end = op.finish.replace(tzinfo=None) if op.finish.tzinfo else op.finish
+                        op_end_times.append(op_end)
+
+                if op_start_times:
+                    earliest_start = min(op_start_times)
+                    # 작전 시작 30초 전부터 조회 (사전 탐지 포함)
+                    query_start = (earliest_start - timedelta(seconds=30)).isoformat()
+
+                    if op_end_times:
+                        latest_end = max(op_end_times)
+                    else:
+                        # 종료 시간이 없으면 현재 시간 사용
+                        latest_end = datetime.utcnow()
+
+                    # 작전 종료 30초 후까지 조회 (지연 탐지 포함)
+                    query_end = (latest_end + timedelta(seconds=30)).isoformat()
+
+                    time_range_query = {
+                        "range": {
+                            "timestamp": {
+                                "gte": query_start,
+                                "lte": query_end
+                            }
+                        }
+                    }
+
+                    self.log.info(
+                        f'[BASTION] Operation 시간 범위 쿼리: {query_start} ~ {query_end}'
+                    )
+                else:
+                    # 시작 시간이 없으면 기본 범위 사용
+                    time_range_query = {"range": {"timestamp": {"gte": f"now-{hours}h"}}}
+            else:
+                # 오퍼레이션 필터가 없으면 기본 시간 범위 사용
+                time_range_query = {"range": {"timestamp": {"gte": f"now-{hours}h"}}}
+
             query = {
                 "query": {
                     "bool": {
                         "must": [
                             {"range": {"rule.level": {"gte": min_level}}},
-                            {"range": {"timestamp": {"gte": f"now-{hours}h"}}}
+                            time_range_query
                         ]
                     }
                 },
                 "size": 1000,
                 "sort": [{"timestamp": {"order": "asc"}}],
                 "_source": [
-                    "timestamp", "rule.id", "rule.level", "rule.description",
-                    "agent.id", "agent.name", "data.mitre.id", "data.mitre.tactic"
+                    "@timestamp", "timestamp", "rule.id", "rule.level", "rule.description",
+                    "data.mitre", "data.mitre.id", "data.mitre.tactic",
+                    "agent.id", "agent.name", "rule.mitre.technique", "rule.mitre.id"
                 ]
             }
 
             detected_techniques = set()
             detection_events = []
 
-            async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(ssl=self.verify_ssl)) as session:
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                connector=aiohttp.TCPConnector(ssl=self.verify_ssl)
+            ) as session:
                 auth = aiohttp.BasicAuth(self.indexer_username, self.indexer_password)
                 async with session.post(
                     f'{self.indexer_url}/wazuh-alerts-*/_search',
@@ -952,19 +1074,39 @@ class BASTIONService:
 
                         for alert in alerts:
                             source = alert.get('_source', {})
+                            doc_id = alert.get('_id')
+                            ts = source.get('@timestamp') or source.get('timestamp')
 
                             # MITRE 기법 추출
                             mitre_data = source.get('data', {}).get('mitre', {})
+                            rule_mitre = source.get('rule', {}).get('mitre', {})
                             technique_id = None
                             tactic = None
 
+                            # 1. data.mitre.id 확인
                             if isinstance(mitre_data, dict):
                                 technique_id = mitre_data.get('id')
                                 tactic = mitre_data.get('tactic', [])
                                 if isinstance(tactic, list) and tactic:
                                     tactic = tactic[0]
 
-                            # 규칙 ID 매핑 테이블 사용
+                            # 2. rule.mitre.id 확인 (배열인 경우 첫 번째 요소 추출)
+                            if not technique_id and isinstance(rule_mitre, dict):
+                                rule_mitre_id = rule_mitre.get('id')
+                                if isinstance(rule_mitre_id, list) and rule_mitre_id:
+                                    technique_id = rule_mitre_id[0]
+                                elif isinstance(rule_mitre_id, str):
+                                    technique_id = rule_mitre_id
+
+                                # tactic도 추출
+                                if not tactic:
+                                    rule_mitre_tactic = rule_mitre.get('tactic')
+                                    if isinstance(rule_mitre_tactic, list) and rule_mitre_tactic:
+                                        tactic = rule_mitre_tactic[0]
+                                    elif isinstance(rule_mitre_tactic, str):
+                                        tactic = rule_mitre_tactic
+
+                            # 3. 규칙 ID 매핑 테이블 사용
                             if not technique_id:
                                 rule_id = str(source.get('rule', {}).get('id', ''))
                                 technique_id = self.RULE_MITRE_MAPPING.get(rule_id)
@@ -972,13 +1114,12 @@ class BASTIONService:
                             if technique_id:
                                 detected_techniques.add(technique_id)
 
-                            # Detection events에 agent.id 및 agent_os 추가
-                            timestamp = source.get('timestamp')
                             agent_id = source.get('agent', {}).get('id')
                             agent_os = wazuh_agent_os_map.get(agent_id, 'unknown')
 
                             detection_events.append({
-                                'timestamp': timestamp,
+                                'doc_id': doc_id,
+                                'timestamp': ts,
                                 'rule_id': source.get('rule', {}).get('id'),
                                 'rule_level': source.get('rule', {}).get('level'),
                                 'description': source.get('rule', {}).get('description'),
@@ -986,23 +1127,210 @@ class BASTIONService:
                                 'agent_id': agent_id,
                                 'agent_os': agent_os,
                                 'technique_id': technique_id,
-                                'tactic': tactic
+                                'tactic': tactic,
+                                'match_status': 'UNMATCHED',
+                                'attack_step_id': None,
+                                'match_source': 'wazuh',
+                                'opId': None,
                             })
 
-            # 3. Security Posture Score 계산 (Cymulate/AttackIQ 스타일)
+            # 3-A. IntegrationEngine 기반으로 detection_events 매칭 정보 반영
+            self.log.info(
+                f"[BASTION DEBUG] 매칭 조건 확인: "
+                f"has_integration_engine={hasattr(self, 'integration_engine')}, "
+                f"integration_engine_exists={self.integration_engine is not None if hasattr(self, 'integration_engine') else False}, "
+                f"filtered_ops_count={len(filtered_ops)}"
+            )
+
+            try:
+                if hasattr(self, "integration_engine") and self.integration_engine and filtered_ops:
+                    # 1) detection_events 인덱스 구축: (rule_id, agent_id) -> [(event_dt, ev), ...]
+                    index_by_rule_agent: Dict[tuple, List[tuple]] = {}
+
+                    self.log.info(
+                        f"[BASTION DEBUG] 매칭 시작 - detection_events: {len(detection_events)}개"
+                    )
+
+                    # 🔍 디버그: detection_events 샘플 출력
+                    if detection_events:
+                        sample = detection_events[0]
+                        self.log.info(
+                            f"[BASTION DEBUG] Sample detection event: "
+                            f"rule_id={sample.get('rule_id')}, "
+                            f"technique_id={sample.get('technique_id')}, "
+                            f"timestamp={sample.get('timestamp')}, "
+                            f"agent_id={sample.get('agent_id')}"
+                        )
+
+                    for ev in detection_events:
+                        ts = ev.get("timestamp")
+                        rule_id = str(ev.get("rule_id"))
+                        agent_id = str(ev.get("agent_id") or "")
+
+                        if not ts or not rule_id:
+                            continue
+
+                        try:
+                            ev_dt = date_parser.parse(ts)
+                        except Exception:
+                            continue
+
+                        key = (rule_id, agent_id)
+                        index_by_rule_agent.setdefault(key, []).append((ev_dt, ev))
+
+                    # 정렬해두면 나중에 시간 차 계산할 때 조금 낫다
+                    for key in index_by_rule_agent:
+                        index_by_rule_agent[key].sort(key=lambda x: x[0])
+
+                    self.log.info(
+                        f"[BASTION DEBUG] 인덱스 구축 완료: {len(index_by_rule_agent)}개 키"
+                    )
+
+                    THRESHOLD_SEC = 5  # ±5초 이내면 같은 이벤트로 본다
+                    total_matched = 0
+
+                    self.log.info(
+                        f"[BASTION] dashboard correlation 시작: "
+                        f"ops={len(filtered_ops)}, detections={len(detection_events)}"
+                    )
+
+                    for op in filtered_ops:
+                        try:
+                            self.log.info(
+                                f"[BASTION DEBUG] IntegrationEngine.correlate() 호출: "
+                                f"op={getattr(op, 'name', '')} ({getattr(op, 'id', '')})"
+                            )
+                            link_results = await self.integration_engine.correlate(op)
+
+                            self.log.info(
+                                f"[BASTION DEBUG] IntegrationEngine 결과: {len(link_results)}개 링크"
+                            )
+
+                            # 🔍 각 링크의 매칭 결과 출력
+                            for lr in link_results:
+                                self.log.info(
+                                    f"[BASTION DEBUG] Link: {lr.get('ability_name')} "
+                                    f"(technique={lr.get('technique_id')}), "
+                                    f"detected={lr.get('detected')}, "
+                                    f"matches={lr.get('match_count')}"
+                                )
+
+                        except Exception as ce:
+                            self.log.warning(
+                                f"[BASTION] correlate 실패 (op={getattr(op, 'id', '')}): {ce}"
+                            )
+                            import traceback
+                            traceback.print_exc()
+                            continue
+
+                        op_name = getattr(op, "name", "")
+                        op_id = getattr(op, "id", "")
+                        op_label = f"{op_name} ({op_id})" if (op_name or op_id) else op_id
+
+                        for lr in link_results or []:
+                            link_id = lr.get("link_id")
+
+                            for m in lr.get("matches", []):
+                                ts = m.get("@timestamp") or m.get("timestamp")
+                                if not ts:
+                                    continue
+
+                                try:
+                                    m_dt = date_parser.parse(ts)
+                                except Exception:
+                                    continue
+
+                                # rule_id 추출
+                                rule_id = str(
+                                    m.get("rule.id")
+                                    or m.get("rule_id")
+                                    or ""
+                                )
+                                if not rule_id:
+                                    continue
+
+                                # agent_id 추출 (dict/flat 모두 대응)
+                                agent = m.get("agent") or {}
+                                if isinstance(agent, dict):
+                                    agent_id = str(agent.get("id") or "")
+                                else:
+                                    agent_id = str(
+                                        m.get("agent.id")
+                                        or m.get("agent_id")
+                                        or ""
+                                    )
+
+                                # 우선 (rule_id, agent_id) 키로 찾고,
+                                # agent_id가 없으면 rule_id만으로 fallback
+                                keys_to_try = []
+                                if agent_id:
+                                    keys_to_try.append((rule_id, agent_id))
+                                keys_to_try.append((rule_id, ""))  # fallback: agent 없이 rule만
+
+                                matched_here = False
+
+                                for key in keys_to_try:
+                                    candidates = index_by_rule_agent.get(key, [])
+                                    if not candidates:
+                                        continue
+
+                                    # 가장 가까운 이벤트 하나 찾기
+                                    best_ev = None
+                                    best_diff = None
+
+                                    for ev_dt, ev in candidates:
+                                        diff = abs((ev_dt - m_dt).total_seconds())
+                                        if best_diff is None or diff < best_diff:
+                                            best_diff = diff
+                                            best_ev = ev
+
+                                    if best_ev is not None and best_diff is not None and best_diff <= THRESHOLD_SEC:
+                                        # 매칭 성공
+                                        best_ev["match_status"] = "MATCHED"
+                                        best_ev["attack_step_id"] = link_id
+                                        best_ev["match_source"] = "wazuh"
+                                        best_ev["opId"] = op_label
+                                        total_matched += 1
+                                        matched_here = True
+                                        break  # 이 match(m)는 더 이상 다른 key로 안 봐도 됨
+
+                                if not matched_here:
+                                    self.log.debug(
+                                        f"[BASTION DEBUG] match 미매칭: "
+                                        f"rule_id={rule_id}, agent_id={agent_id}, ts={ts}"
+                                    )
+
+                    self.log.info(
+                        f"[BASTION] dashboard correlation matched events: {total_matched}"
+                    )
+            except Exception as e:
+                self.log.warning(f"[BASTION] dashboard correlation 반영 실패: {e}")
+
+            # 🔻 op 필터 있을 때: 오퍼레이션 시간 범위 내 모든 탐지 표시 (MATCHED 여부 관계없이)
+            # 사용자가 어떤 탐지가 매칭되었고 안되었는지 확인할 수 있도록 함
+            if operation_id_filter:
+                before = len(detection_events)
+                # 모든 탐지 이벤트를 유지 (시간 범위 쿼리로 이미 필터링됨)
+                # match_status 컬럼을 통해 MATCHED/UNMATCHED 구분 가능
+                self.log.info(
+                    f"[BASTION] operation_id_filter={operation_id_filter} 적용: "
+                    f"시간 범위 내 모든 탐지 표시 (total: {len(detection_events)}, "
+                    f"matched: {sum(1 for ev in detection_events if ev.get('match_status') == 'MATCHED')})"
+                )
+
+            # 4. Security Posture Score 계산 (Cymulate/AttackIQ 스타일)
             agents = await self.data_svc.locate('agents')
             total_agents = len(agents)
 
             matched_techniques = operation_techniques.intersection(detected_techniques)
-            coverage = len(matched_techniques) / len(operation_techniques) if operation_techniques else 0.0
+            coverage = (
+                len(matched_techniques) / len(operation_techniques)
+                if operation_techniques else 0.0
+            )
 
-            # Detection Rate (0-100%)
             detection_rate = round(coverage * 100, 1)
-
-            # Security Score 계산 (Detection Rate 기반)
             security_score = int(detection_rate)
 
-            # Grade 계산 (A-F)
             if security_score >= 90:
                 security_grade = 'A'
             elif security_score >= 80:
@@ -1014,7 +1342,7 @@ class BASTIONService:
             else:
                 security_grade = 'F'
 
-            # MTTD 계산 (Mean Time To Detection) - 공격과 탐지 시간 차이
+            # MTTD 계산 (Mean Time To Detection)
             mttd_seconds = 0
             mttd_count = 0
             for op in operations_data:
@@ -1022,19 +1350,19 @@ class BASTIONService:
                     for step in op['attack_steps']:
                         step_time = step.get('timestamp')
                         if step_time:
-                            # 해당 technique의 탐지 이벤트 찾기
                             step_technique = step.get('technique_id')
                             for event in detection_events:
                                 if event.get('technique_id') == step_technique:
                                     try:
-                                        from dateutil import parser as date_parser
                                         attack_time = date_parser.parse(step_time).replace(tzinfo=None)
-                                        detection_time = date_parser.parse(event['timestamp']).replace(tzinfo=None)
+                                        detection_time = date_parser.parse(
+                                            event['timestamp']
+                                        ).replace(tzinfo=None)
                                         time_diff = (detection_time - attack_time).total_seconds()
-                                        if time_diff >= 0:  # 탐지가 공격 이후인 경우만
+                                        if time_diff >= 0:
                                             mttd_seconds += time_diff
                                             mttd_count += 1
-                                    except:
+                                    except Exception:
                                         pass
 
             mttd_minutes = round(mttd_seconds / 60 / mttd_count, 1) if mttd_count > 0 else 0
@@ -1042,7 +1370,7 @@ class BASTIONService:
             # Critical Gaps (시뮬레이션했지만 탐지 안된 technique 수)
             critical_gaps = len(operation_techniques - detected_techniques)
 
-            # Tactic Coverage (14개 tactic 중 몇 개 커버하는지)
+            # Tactic Coverage
             all_tactics = set()
             for op in operations_data:
                 for step in op.get('attack_steps', []):
@@ -1059,7 +1387,6 @@ class BASTIONService:
                     'total_detections': len(detection_events),
                     'coverage': round(coverage, 2),
                     'last_seen': detection_events[0]['timestamp'] if detection_events else None,
-                    # Week 11: Security Posture Metrics
                     'security_score': security_score,
                     'security_grade': security_grade,
                     'detection_rate': detection_rate,
@@ -1072,7 +1399,10 @@ class BASTIONService:
                 'query_time': datetime.utcnow().isoformat()
             }
 
-            self.log.info(f'[BASTION] 대시보드 요약 생성 완료 (작전: {len(operations_data)}, 탐지: {len(detection_events)}, Score: {security_score}/{security_grade})')
+            self.log.info(
+                f'[BASTION] 대시보드 요약 생성 완료 (작전: {len(operations_data)}, '
+                f'탐지: {len(detection_events)}, Score: {security_score}/{security_grade})'
+            )
             return web.json_response(result)
 
         except Exception as e:
@@ -1082,49 +1412,46 @@ class BASTIONService:
                 'error': str(e)
             }, status=500)
 
+
     async def get_technique_coverage(self, request: web.Request) -> web.Response:
         """
-        MITRE ATT&CK Technique 커버리지 분석 (Tier 2 Heat Map용)
+        MITRE ATT&CK Technique 커버리지 분석 (Heat Map용)
 
-        각 technique별로 시뮬레이션 횟수와 탐지 횟수를 집계하여
-        Detection Rate를 계산합니다.
-
-        Query Parameters:
-            hours: 조회 시간 범위 (기본: 24시간)
+        - Caldera 작전 링크에서 시뮬레이션된 technique 통계 수집
+        - Wazuh Indexer에서 alert 조회해서 탐지된 technique 카운트
         """
         try:
             hours = int(request.query.get('hours', 24))
             self.log.info(f'[BASTION] Technique 커버리지 분석: 최근 {hours}시간')
 
-            # 1. 모든 agents의 links에서 technique 추출
-            all_agents = await self.data_svc.locate('agents')
-            technique_stats = {}  # {technique_id: {simulated: N, detected: N, name: str, tactic: str}}
+            now_utc = datetime.utcnow()
+            cutoff_time = now_utc - timedelta(hours=hours)
 
-            cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+            # 1. Caldera operations & links 기반으로 "시뮬레이션된" technique 집계
+            technique_stats: Dict[str, Dict[str, Any]] = {}
 
-            for agent in all_agents:
-                if not hasattr(agent, 'links') or not agent.links:
+            operations = await self.data_svc.locate('operations')
+            for op in operations:
+                if not op.start:
                     continue
 
-                for link in agent.links:
-                    # 시간 필터링
-                    if link.finish:
-                        if isinstance(link.finish, datetime):
-                            finish_time = link.finish.replace(tzinfo=None) if link.finish.tzinfo else link.finish
-                            if finish_time < cutoff_time:
-                                continue
-                        elif isinstance(link.finish, str):
-                            # 문자열인 경우 datetime으로 파싱 시도
-                            try:
-                                from dateutil import parser as date_parser
-                                finish_time = date_parser.parse(link.finish).replace(tzinfo=None)
-                                if finish_time < cutoff_time:
-                                    continue
-                            except:
-                                pass  # 파싱 실패 시 시간 필터링 스킵
+                # timezone-aware → naive 로 통일해서 비교
+                op_start = op.start
+                if isinstance(op_start, datetime):
+                    if op_start.tzinfo:
+                        op_start = op_start.replace(tzinfo=None)
+                else:
+                    # 문자열인 경우는 그냥 통과 (필터 못 씀)
+                    pass
 
-                    # Technique 정보 추출
-                    ability = link.ability
+                if isinstance(op_start, datetime) and op_start < cutoff_time:
+                    continue
+
+                if not hasattr(op, 'chain') or not op.chain:
+                    continue
+
+                for link in op.chain:
+                    ability = getattr(link, 'ability', None)
                     if not ability or not ability.technique_id:
                         continue
 
@@ -1135,117 +1462,166 @@ class BASTIONService:
                             'name': ability.technique_name or tech_id,
                             'tactic': ability.tactic or 'unknown',
                             'simulated': 0,
-                            'detected': 0
+                            'detected': 0,
                         }
-
                     technique_stats[tech_id]['simulated'] += 1
 
-            # 2. Wazuh alerts 조회하여 탐지 통계 추가
-            try:
-                await self.ensure_authenticated()
-                alerts = await self.query_indexer_alerts(hours=hours, min_level=1)
+            # 2. Wazuh alerts 조회해서 "탐지된" technique 집계
+            if technique_stats:
+                try:
+                    timeout = aiohttp.ClientTimeout(total=30)
+                    connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
 
-                for alert in alerts:
-                    rule = alert.get('rule', {})
-                    mitre = rule.get('mitre', {})
-                    technique_list = mitre.get('technique', [])
+                    # 최근 N시간 alert 조회
+                    query = {
+                        "query": {
+                            "bool": {
+                                "must": [
+                                    {"range": {"timestamp": {"gte": f"now-{hours}h"}}}
+                                ]
+                            }
+                        },
+                        "size": 1000,
+                        "_source": [
+                            "@timestamp",
+                            "timestamp",
+                            "rule.id",
+                            "rule.level",
+                            "rule.description",
+                            "agent.id",
+                            "agent.name",
+                            "data.mitre",   
+                            "data.mitre.id",
+                            "data.mitre.tactic",
+                            "rule.mitre.technique", 
+                            "rule.mitre.id",
+                        ]
+                    }
 
-                    # Wazuh rule → technique 매핑도 활용
-                    rule_id = str(rule.get('id', ''))
-                    if rule_id in self.RULE_MITRE_MAPPING:
-                        mapped_tech = self.RULE_MITRE_MAPPING[rule_id]
-                        if mapped_tech not in technique_list:
-                            technique_list.append(mapped_tech)
+                    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                        auth = aiohttp.BasicAuth(self.indexer_username, self.indexer_password)
+                        async with session.post(
+                            f"{self.indexer_url}/wazuh-alerts-*/_search",
+                            json=query,
+                            auth=auth,
+                        ) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                hits = data.get("hits", {}).get("hits", [])
 
-                    # 탐지된 technique 카운트
-                    for tech_id in technique_list:
-                        if tech_id in technique_stats:
-                            technique_stats[tech_id]['detected'] += 1
+                                for hit in hits:
+                                    src = hit.get("_source", {})
+                                    mitre = src.get("data", {}).get("mitre", {})
 
-            except Exception as e:
-                self.log.warning(f'[BASTION] Wazuh alerts 조회 실패 (탐지 통계 없이 진행): {e}')
+                                    tech_id = None
 
-            # 3. Detection Rate 계산
-            techniques = []
+                                    # 1) data.mitre.id 직접 사용
+                                    if isinstance(mitre, dict):
+                                        tech_id = mitre.get("id")
+
+                                    # 2) 없으면 rule.id → RULE_MITRE_MAPPING 매핑
+                                    if not tech_id:
+                                        rule_id = str(src.get("rule", {}).get("id", ""))
+                                        tech_id = self.RULE_MITRE_MAPPING.get(rule_id)
+
+                                    if tech_id and tech_id in technique_stats:
+                                        technique_stats[tech_id]["detected"] += 1
+                            else:
+                                err = await resp.text()
+                                self.log.warning(
+                                    f"[BASTION] Technique coverage용 Indexer 쿼리 실패: HTTP {resp.status} {err}"
+                                )
+                except Exception as e:
+                    # 탐지 통계 없이도 화면은 뜨게 한다
+                    self.log.warning(f"[BASTION] Wazuh alerts 조회 실패 (탐지=0으로 진행): {e}")
+
+            # 3. Detection rate / status 계산
+            techniques: List[Dict[str, Any]] = []
             for tech_id, stats in technique_stats.items():
-                simulated = stats['simulated']
-                detected = stats['detected']
-                detection_rate = (detected / simulated * 100) if simulated > 0 else 0
+                simulated = stats["simulated"]
+                detected = stats["detected"]
+                rate = (detected / simulated * 100.0) if simulated > 0 else 0.0
 
-                # 상태 결정: 회색(미시뮬), 빨강(갭), 노랑(부분), 초록(완전)
                 if simulated == 0:
-                    status = 'not_simulated'  # 회색
+                    status = "not_simulated"  # 회색
                 elif detected == 0:
-                    status = 'gap'  # 빨강
-                elif detection_rate < 80:
-                    status = 'partial'  # 노랑
+                    status = "gap"            # 빨강
+                elif rate < 80:
+                    status = "partial"        # 노랑
                 else:
-                    status = 'complete'  # 초록
+                    status = "complete"       # 초록
 
                 techniques.append({
-                    'id': tech_id,
-                    'name': stats['name'],
-                    'tactic': stats['tactic'],
-                    'simulated': simulated,
-                    'detected': detected,
-                    'detection_rate': round(detection_rate, 1),
-                    'status': status
+                    "id": tech_id,
+                    "name": stats["name"],
+                    "tactic": stats["tactic"],
+                    "simulated": simulated,
+                    "detected": detected,
+                    "detection_rate": round(rate, 1),
+                    "status": status,
                 })
 
-            # Tactic별 그룹화
-            tactics = {}
+            # 4. Tactic별 집계
+            tactics: Dict[str, Dict[str, Any]] = {}
             for tech in techniques:
-                tactic = tech['tactic']
+                tactic = tech["tactic"]
                 if tactic not in tactics:
                     tactics[tactic] = {
-                        'name': tactic,
-                        'techniques': [],
-                        'total_simulated': 0,
-                        'total_detected': 0
+                        "name": tactic,
+                        "techniques": [],
+                        "total_simulated": 0,
+                        "total_detected": 0,
                     }
-                tactics[tactic]['techniques'].append(tech)
-                tactics[tactic]['total_simulated'] += tech['simulated']
-                tactics[tactic]['total_detected'] += tech['detected']
+                tactics[tactic]["techniques"].append(tech)
+                tactics[tactic]["total_simulated"] += tech["simulated"]
+                tactics[tactic]["total_detected"] += tech["detected"]
 
-            # Tactic 커버리지 계산
-            for tactic_data in tactics.values():
-                total = tactic_data['total_simulated']
-                detected = tactic_data['total_detected']
-                tactic_data['coverage'] = round((detected / total * 100) if total > 0 else 0, 1)
+            for t in tactics.values():
+                total = t["total_simulated"]
+                detected = t["total_detected"]
+                t["coverage"] = round((detected / total * 100.0) if total > 0 else 0.0, 1)
+
+            summary = {
+                "total_techniques": len(techniques),
+                "total_simulated": sum(t["simulated"] for t in techniques),
+                "total_detected": sum(t["detected"] for t in techniques),
+                "overall_detection_rate": round(
+                    (
+                        sum(t["detected"] for t in techniques)
+                        / sum(t["simulated"] for t in techniques)
+                        * 100.0
+                    )
+                    if techniques and sum(t["simulated"] for t in techniques) > 0
+                    else 0.0,
+                    1,
+                ),
+            }
 
             return web.json_response({
-                'techniques': techniques,
-                'tactics': list(tactics.values()),
-                'summary': {
-                    'total_techniques': len(techniques),
-                    'total_simulated': sum(t['simulated'] for t in techniques),
-                    'total_detected': sum(t['detected'] for t in techniques),
-                    'overall_detection_rate': round(
-                        sum(t['detected'] for t in techniques) / sum(t['simulated'] for t in techniques) * 100
-                        if sum(t['simulated'] for t in techniques) > 0 else 0,
-                        1
-                    )
+                "techniques": techniques,
+                "tactics": list(tactics.values()),
+                "summary": summary,
+                "time_range": {
+                    "hours": hours,
+                    "from": cutoff_time.isoformat(),
+                    "to": now_utc.isoformat(),
                 },
-                'time_range': {
-                    'hours': hours,
-                    'from': (datetime.utcnow() - timedelta(hours=hours)).isoformat(),
-                    'to': datetime.utcnow().isoformat()
-                }
             })
 
         except Exception as e:
-            self.log.error(f'[BASTION] Technique 커버리지 조회 실패: {e}', exc_info=True)
+            self.log.error(f"[BASTION] Technique 커버리지 조회 실패: {e}", exc_info=True)
             return web.json_response({
-                'error': str(e),
-                'techniques': [],
-                'tactics': [],
-                'summary': {
-                    'total_techniques': 0,
-                    'total_simulated': 0,
-                    'total_detected': 0,
-                    'overall_detection_rate': 0
-                }
+                "error": str(e),
+                "techniques": [],
+                "tactics": [],
+                "summary": {
+                    "total_techniques": 0,
+                    "total_simulated": 0,
+                    "total_detected": 0,
+                    "overall_detection_rate": 0.0,
+                },
             }, status=500)
+
 
     async def continuous_monitoring(self):
         """지속적인 Wazuh 알림 모니터링 (백그라운드 태스크)"""

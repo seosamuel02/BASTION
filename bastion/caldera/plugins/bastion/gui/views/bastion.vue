@@ -26,6 +26,40 @@ ChartJS.register(
   Filler
 );
 
+const detectionEvents = ref([]);  // 테이블에서 실제로 쓸 이벤트 배열
+
+const transformDetectionEvents = (rawEvents) => {
+  console.log("📌 [DEBUG] rawEvents:", rawEvents);
+  detectionEvents.value = (rawEvents || []).map(ev => ({
+    // IntegrationEngine._summarize_hit() 기준 매핑 예시
+    timestamp: ev['@timestamp'] || ev.timestamp || null,
+    agent_name: ev['agent.name'] || ev.agent_name || null,
+    rule_id: ev['rule.id'] || ev.rule_id || null,
+    rule_level: ev.level ?? ev.rule_level ?? null,
+    technique_id: ev.technique_id || ev['mitre.id'] || null,
+
+    // 매칭 상태 / step / source / operation 정보
+    match_status: ev.match_status || 'matched',                 // 필요시 백엔드에서 넘겨줘도 됨
+    attack_step_id: ev.attack_step_id || ev.link_id || null,    // Caldera link id 등을 붙이고 싶으면 여기
+    match_source: ev.match_source || ev.source || 'wazuh',      // NIDS/HIDS 구분 시 사용
+    opId: ev.op_id || ev.operation_id || ev.opId || null,
+
+    description: ev.description || ev.message || '',
+        timestamp: ev.timestamp || ev['@timestamp'] || null,
+    agent_name: ev.agent_name || ev['agent.name'] || null,
+    rule_id: ev.rule_id || ev['rule.id'] || null,
+    rule_level: ev.rule_level ?? ev.level ?? null,
+    technique_id: ev.technique_id || ev['mitre.id'] || null,
+
+    match_status: ev.match_status || 'matched',
+    attack_step_id: ev.attack_step_id || ev.link_id || null,
+    match_source: ev.match_source || ev.source || 'wazuh',
+    opId: ev.opId || ev.operation_id || ev.op_id || null,
+  }));
+
+    console.log("📌 [DEBUG] mappedEvents:", detectionEvents.value);
+};
+
 const $api = inject("$api");
 
 const isLoading = ref(false);
@@ -147,6 +181,8 @@ const fetchDashboardSummary = async () => {
     const response = await $api.get(url);
     Object.assign(dashboardData, response.data);
 
+    transformDetectionEvents(response.data.detection_events || []);
+
     // Store all operations for dropdown (only when no operation filter applied)
     if (filters.operation_id === 'all' && response.data.operations) {
       allOperations.value = response.data.operations;
@@ -233,7 +269,7 @@ const clearAgentFilter = () => {
 
 // Computed Properties
 const filteredDetections = computed(() => {
-  let detections = dashboardData.detection_events;
+  let detections = detectionEvents.value;
 
   if (selectedAgentHost.value) {
     detections = detections.filter(d => d.agent_name === selectedAgentHost.value);
@@ -380,9 +416,9 @@ const filteredKPI = computed(() => {
   // Get last seen from filtered agents
   const last_seen = filtered_agents.length > 0
     ? filtered_agents.reduce((latest, agent) => {
-        const agentTime = new Date(agent.last_seen);
-        return agentTime > latest ? agentTime : latest;
-      }, new Date(0)).toISOString()
+      const agentTime = new Date(agent.last_seen);
+      return agentTime > latest ? agentTime : latest;
+    }, new Date(0)).toISOString()
     : null;
 
   // Week 11: Security metrics from backend API
@@ -1161,7 +1197,7 @@ const timelineChartOptions = {
     <div class="section">
       <div class="is-flex is-justify-content-space-between is-align-items-center mb-4">
         <h3 class="title is-5">
-          Detections (Wazuh)
+          Detections 매칭
           <span v-if="selectedAgentHost" class="tag is-info is-light ml-2">
             필터: {{ selectedAgentHost }}
           </span>
@@ -1186,12 +1222,22 @@ const timelineChartOptions = {
               <th>Rule</th>
               <th>Level</th>
               <th>Technique</th>
+              <th>매칭 상태</th> 
+              <th>Step</th>
+              <th>Source</th>
               <th>Operation</th>
               <th>Description</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(event, idx) in filteredDetections.slice(0, 400)" :key="idx">
+            <tr
+              v-for="(event, idx) in filteredDetections.slice(0, 400)"
+              :key="idx"
+              :class="{
+                'has-background-success-dark': event.match_status === 'matched',
+                'has-background-warning-dark': event.match_status === 'partial'
+              }"
+            >
               <td class="is-size-7">{{ formatTimestamp(event.timestamp) }}</td>
               <td class="is-size-7">{{ event.agent_name || '-' }}</td>
               <td class="is-size-7">{{ event.rule_id }}</td>
@@ -1206,6 +1252,39 @@ const timelineChartOptions = {
                 </span>
                 <span v-else class="has-text-grey">-</span>
               </td>
+
+              <!--  매칭 상태 -->
+              <td>
+                <span
+                  class="tag is-small"
+                  :class="{
+                    'is-success': event.match_status === 'matched',
+                    'is-warning': event.match_status === 'partial',
+                    'is-light': !event.match_status || event.match_status === 'unmatched'
+                  }"
+                >
+                  <span v-if="event.match_status === 'matched'">MATCHED</span>
+                  <span v-else-if="event.match_status === 'partial'">PARTIAL</span>
+                  <span v-else>UNMATCHED</span>
+                </span>
+              </td>
+
+              <!-- Caldera 공격 Step (link id / paw_step 등) -->
+              <td class="is-size-7">
+                <span v-if="event.attack_step_id" class="tag is-info is-light is-small">
+                  {{ event.attack_step_id }}
+                </span>
+                <span v-else class="has-text-grey">-</span>
+              </td>
+
+              <!--  탐지 소스 (Wazuh / Suricata 등) -->
+              <td class="is-size-7">
+                <span v-if="event.match_source" class="tag is-light is-small">
+                  {{ event.match_source }}
+                </span>
+                <span v-else class="has-text-grey">-</span>
+              </td>
+
               <td class="is-size-7">{{ event.opId || '-' }}</td>
               <td class="is-size-7" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis;">
                 {{ event.description }}
