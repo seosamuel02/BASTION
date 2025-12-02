@@ -1,8 +1,6 @@
 # BASTION - Caldera-Wazuh Integration Platform
 # Unified Docker Compose for development
 
-version: '3.8'
-
 services:
   # Wazuh Manager
   wazuh.manager:
@@ -78,6 +76,9 @@ services:
 
   # Caldera 5.3.0 with BASTION Plugin
   caldera:
+    build:
+      context: ./caldera
+      dockerfile: Dockerfile
     image: caldera:5.3-bastion
     hostname: caldera
     restart: always

@@ -201,14 +201,22 @@ class BASTIONService:
                             
 
                             # 1. 먼저 알림에서 직접 MITRE 데이터 확인
-                            mitre_data = source.get('data', {}).get('mitre', {})
+                            # rule.mitre.id 필드에서 기술 ID 추출
+                            rule_data = source.get('rule', {})
+                            mitre_data = rule_data.get('mitre', {})
                             technique_id = None
+
                             if isinstance(mitre_data, dict) and 'id' in mitre_data:
-                                technique_id = mitre_data['id']
+                                # mitre.id는 배열일 수 있으므로 첫 번째 값 사용
+                                mitre_ids = mitre_data['id']
+                                if isinstance(mitre_ids, list) and len(mitre_ids) > 0:
+                                    technique_id = mitre_ids[0]
+                                elif isinstance(mitre_ids, str):
+                                    technique_id = mitre_ids
 
                             # 2. MITRE 데이터가 없으면 규칙 ID 매핑 테이블 사용
                             if not technique_id:
-                                rule_id = str(source.get('rule', {}).get('id', ''))
+                                rule_id = str(rule_data.get('id', ''))
                                 technique_id = self.RULE_MITRE_MAPPING.get(rule_id)
 
                             if technique_id:
@@ -1162,7 +1170,7 @@ class BASTIONService:
                                 'agent_os': agent_os,
                                 'technique_id': technique_id,
                                 'tactic': tactic,
-                                'match_status': 'UNMATCHED',
+                                'match_status': 'unmatched',
                                 'attack_step_id': None,
                                 'match_source': 'wazuh',
                                 'opId': None,
@@ -1233,9 +1241,10 @@ class BASTIONService:
                         f"[BASTION DEBUG] 인덱스 구축 완료: {len(index_by_rule_agent)}개 키"
                     )
 
-                    # ±60초 이내면 같은 이벤트로 본다 (로그 전송 지연 고려)
+                    # ±5분 이내면 같은 이벤트로 본다 (로그 전송 지연 고려)
                     # 네트워크 지연, Wazuh 처리 시간, Elasticsearch 인덱싱 시간 등을 고려
-                    THRESHOLD_SEC = 60
+                    # 실제 테스트 결과 3-4분 지연이 발생하므로 여유있게 설정
+                    THRESHOLD_SEC = 300
                     total_matched = 0
 
                     self.log.info(
@@ -1283,9 +1292,25 @@ class BASTIONService:
                         for lr in link_results or []:
                             try:
                                 link_id = lr.get("link_id")
+                                matches_list = lr.get("matches", [])
 
-                                for m in lr.get("matches", []):
+                                # 🔍 매칭 시작 디버그 (조건 없이 항상 출력)
+                                if matches_list:
+                                    self.log.info(
+                                        f"[BASTION DEBUG] Processing {len(matches_list)} matches for link {link_id}"
+                                    )
+
+                                for idx, m in enumerate(matches_list):
                                     try:
+                                        # 🔍 첫 번째 매칭 디버그 (조건 없이 항상 출력)
+                                        if idx == 0:
+                                            self.log.info(
+                                                f"[BASTION DEBUG] First match data: "
+                                                f"keys={list(m.keys())}, "
+                                                f"agent={m.get('agent')}, "
+                                                f"agent.id={m.get('agent.id')}"
+                                            )
+
                                         ts = m.get("@timestamp") or m.get("timestamp")
                                         if not ts:
                                             continue
@@ -1305,8 +1330,8 @@ class BASTIONService:
                                         rule_key = str(rule_id).strip()
 
                                         # agent_id 추출 (dict/flat 모두 대응)
-                                        agent = m.get("agent") or {}
-                                        if isinstance(agent, dict):
+                                        agent = m.get("agent")
+                                        if isinstance(agent, dict) and agent:
                                             agent_id = agent.get("id")
                                         else:
                                             agent_id = m.get("agent.id") or m.get("agent_id")
@@ -1345,7 +1370,7 @@ class BASTIONService:
 
                                             if best_ev is not None and best_diff is not None and best_diff <= THRESHOLD_SEC:
                                                 # 매칭 성공
-                                                best_ev["match_status"] = "MATCHED"
+                                                best_ev["match_status"] = "matched"
                                                 best_ev["attack_step_id"] = link_id
                                                 best_ev["match_source"] = "wazuh"
                                                 best_ev["opId"] = op_label
@@ -1353,13 +1378,19 @@ class BASTIONService:
                                                 matched_here = True
                                                 match_details = f"diff={best_diff:.1f}s, key={key}"
 
-                                                if self.debug:
-                                                    self.log.info(
-                                                        f"[BASTION DEBUG] ✓ 매칭 성공: "
-                                                        f"rule_id={rule_key}, agent_id={agent_key}, "
-                                                        f"time_diff={best_diff:.1f}s, link={link_id}"
-                                                    )
+                                                self.log.info(
+                                                    f"[BASTION DEBUG] ✓ 매칭 성공: "
+                                                    f"rule_id={rule_key}, agent_id={agent_key}, "
+                                                    f"time_diff={best_diff:.1f}s, link={link_id}"
+                                                )
                                                 break  # 이 match(m)는 더 이상 다른 key로 안 봐도 됨
+                                            elif best_ev is not None and best_diff is not None:
+                                                # 후보는 있지만 시간 차이 초과
+                                                self.log.warning(
+                                                    f"[BASTION] ✗ 시간 초과: "
+                                                    f"rule_id={rule_key}, agent_id={agent_key}, "
+                                                    f"time_diff={best_diff:.1f}s > {THRESHOLD_SEC}s, link={link_id}"
+                                                )
 
                                         if not matched_here:
                                             # 매칭 실패 시 상세 정보 로깅
@@ -1393,7 +1424,7 @@ class BASTIONService:
                 self.log.info(
                     f"[BASTION] operation_id_filter={operation_id_filter} 적용: "
                     f"시간 범위 내 모든 탐지 표시 (total: {len(detection_events)}, "
-                    f"matched: {sum(1 for ev in detection_events if ev.get('match_status') == 'MATCHED')})"
+                    f"matched: {sum(1 for ev in detection_events if ev.get('match_status') == 'matched')})"
                 )
 
             # 4. Security Posture Score 계산 (Cymulate/AttackIQ 스타일)
@@ -1455,6 +1486,20 @@ class BASTIONService:
                     if step.get('tactic'):
                         all_tactics.add(step['tactic'])
             tactic_coverage = len(all_tactics)
+
+            # 🔍 API 응답 직전 detection_events 상태 로깅
+            if detection_events:
+                self.log.info(
+                    f"[BASTION DEBUG] API 반환 직전 detection_events 샘플 (처음 3개):"
+                )
+                for i, ev in enumerate(detection_events[:3]):
+                    self.log.info(
+                        f"  [{i}] ts={ev.get('timestamp')}, "
+                        f"rule={ev.get('rule_id')}, "
+                        f"status={ev.get('match_status')}, "
+                        f"step={ev.get('attack_step_id')}, "
+                        f"op={ev.get('opId')}"
+                    )
 
             result = {
                 'success': True,

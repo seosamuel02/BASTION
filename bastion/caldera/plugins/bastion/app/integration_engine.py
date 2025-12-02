@@ -459,6 +459,7 @@ class IntegrationEngine:
                         print(f"  - timestamp: {sample.get('@timestamp') or sample.get('timestamp')}")
                         print(f"  - data.mitre.id: {sample.get('data', {}).get('mitre', {}).get('id')}")
                         print(f"  - rule.mitre: {sample.get('rule', {}).get('mitre')}")
+                        print(f"  - agent: {sample.get('agent')}")
                     except Exception:
                         pass
 
@@ -469,6 +470,11 @@ class IntegrationEngine:
                     summarized = self._summarize_hit(h)
                     if summarized:
                         results.append(summarized)
+                        if self.debug and len(results) == 1:
+                            print(f"[DEBUG] First summarized result:")
+                            print(f"  - rule.id: {summarized.get('rule.id')}")
+                            print(f"  - agent.id: {summarized.get('agent.id')}")
+                            print(f"  - agent.name: {summarized.get('agent.name')}")
                 except Exception as sum_err:
                     if self.debug:
                         print(f"[DEBUG] Failed to summarize hit: {sum_err}")
