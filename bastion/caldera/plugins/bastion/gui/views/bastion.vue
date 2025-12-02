@@ -31,33 +31,25 @@ const detectionEvents = ref([]);  // 테이블에서 실제로 쓸 이벤트 배
 const transformDetectionEvents = (rawEvents) => {
   console.log("📌 [DEBUG] rawEvents:", rawEvents);
   detectionEvents.value = (rawEvents || []).map(ev => ({
-    // IntegrationEngine._summarize_hit() 기준 매핑 예시
+    // IntegrationEngine._summarize_hit() 기준 매핑
     timestamp: ev['@timestamp'] || ev.timestamp || null,
     agent_name: ev['agent.name'] || ev.agent_name || null,
+    agent_id: ev['agent.id'] || ev.agent_id || null,
+    agent_os: ev.agent_os || null,
     rule_id: ev['rule.id'] || ev.rule_id || null,
     rule_level: ev.level ?? ev.rule_level ?? null,
     technique_id: ev.technique_id || ev['mitre.id'] || null,
+    tactic: ev.tactic || null,
+    description: ev.description || ev.message || '',
 
     // 매칭 상태 / step / source / operation 정보
-    match_status: ev.match_status || 'matched',                 // 필요시 백엔드에서 넘겨줘도 됨
-    attack_step_id: ev.attack_step_id || ev.link_id || null,    // Caldera link id 등을 붙이고 싶으면 여기
-    match_source: ev.match_source || ev.source || 'wazuh',      // NIDS/HIDS 구분 시 사용
-    opId: ev.op_id || ev.operation_id || ev.opId || null,
-
-    description: ev.description || ev.message || '',
-        timestamp: ev.timestamp || ev['@timestamp'] || null,
-    agent_name: ev.agent_name || ev['agent.name'] || null,
-    rule_id: ev.rule_id || ev['rule.id'] || null,
-    rule_level: ev.rule_level ?? ev.level ?? null,
-    technique_id: ev.technique_id || ev['mitre.id'] || null,
-
-    match_status: ev.match_status || 'matched',
+    match_status: ev.match_status || 'UNMATCHED',
     attack_step_id: ev.attack_step_id || ev.link_id || null,
     match_source: ev.match_source || ev.source || 'wazuh',
     opId: ev.opId || ev.operation_id || ev.op_id || null,
   }));
 
-    console.log("📌 [DEBUG] mappedEvents:", detectionEvents.value);
+  console.log("📌 [DEBUG] mappedEvents:", detectionEvents.value);
 };
 
 const $api = inject("$api");

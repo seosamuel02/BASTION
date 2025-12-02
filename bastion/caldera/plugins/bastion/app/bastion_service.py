@@ -275,38 +275,62 @@ class BASTIONService:
 
             operation = operations[0]
 
-            # 2) 작전 실행 시간 범위 계산 (timezone 안전)
+            # 2) 작전 실행 시간 범위 계산 (안전한 timezone 처리)
             start_time = operation.start
-            if start_time and start_time.tzinfo:
-                start_time = start_time.replace(tzinfo=None)
+            if start_time:
+                if hasattr(start_time, 'tzinfo') and start_time.tzinfo:
+                    start_time = start_time.replace(tzinfo=None)
+            else:
+                start_time = datetime.utcnow()
 
             end_time = operation.finish if operation.finish else datetime.utcnow()
-            if end_time and end_time.tzinfo:
-                end_time = end_time.replace(tzinfo=None)
+            if end_time:
+                if hasattr(end_time, 'tzinfo') and end_time.tzinfo:
+                    end_time = end_time.replace(tzinfo=None)
 
-            duration_seconds = int((end_time - start_time).total_seconds())
+            try:
+                duration_seconds = int((end_time - start_time).total_seconds())
+            except Exception:
+                duration_seconds = 0
 
-            # 3) 작전에서 실행된 MITRE 기법 & ability 목록 구성 (기존 로직 유지)
+            # 3) 작전에서 실행된 MITRE 기법 & ability 목록 구성 (안전한 처리)
             operation_techniques = set()
             executed_abilities = []
 
             for link in operation.chain:
-                ability = link.ability
-                executed_abilities.append({
-                    'ability_id': ability.ability_id,
-                    'name': ability.name,
-                    'tactic': ability.tactic,
-                    'technique_id': ability.technique_id,
-                    'technique_name': ability.technique_name
-                })
-                if ability.technique_id:
-                    operation_techniques.add(ability.technique_id)
+                try:
+                    ability = getattr(link, 'ability', None)
+                    if not ability:
+                        continue
+
+                    ability_data = {
+                        'ability_id': getattr(ability, 'ability_id', ''),
+                        'name': getattr(ability, 'name', ''),
+                        'tactic': getattr(ability, 'tactic', ''),
+                        'technique_id': getattr(ability, 'technique_id', ''),
+                        'technique_name': getattr(ability, 'technique_name', '')
+                    }
+                    executed_abilities.append(ability_data)
+
+                    if ability_data.get('technique_id'):
+                        operation_techniques.add(ability_data['technique_id'])
+                except Exception as link_err:
+                    self.log.debug(f'[BASTION] 링크 처리 중 에러 (skip): {link_err}')
+                    continue
 
             self.log.info(f'[BASTION] 작전 실행 기법: {operation_techniques}')
 
             # 4) 🔹 IntegrationEngine을 이용해 링크별 탐지 매칭
             #    conf/default.yml에 설정된 index, time_window_sec, 필드 매핑들을 사용
-            link_results = await self.integration_engine.correlate(operation)
+            link_results = []
+            try:
+                link_results = await self.integration_engine.correlate(operation)
+            except Exception as corr_err:
+                self.log.error(f'[BASTION] IntegrationEngine correlate 실패: {corr_err}')
+                return web.json_response({
+                    'success': False,
+                    'error': f'Correlation failed: {str(corr_err)}'
+                }, status=500)
             # link_results 각 원소 예시:
             # {
             #   'link_id': '...',
@@ -329,32 +353,42 @@ class BASTIONService:
             #   ]
             # }
 
-            # 5) 탐지된 Technique / 매칭된 alert 리스트 계산
+            # 5) 탐지된 Technique / 매칭된 alert 리스트 계산 (안전한 처리)
             detected_techniques = set()
             alerts_matched = []
 
             for lr in link_results:
-                tech = lr.get('technique_id')
-                if tech and lr.get('detected'):
-                    detected_techniques.add(tech)
+                try:
+                    tech = lr.get('technique_id')
+                    if tech and lr.get('detected'):
+                        detected_techniques.add(tech)
 
-                link_id = lr.get('link_id')
-                ability_name = lr.get('ability_name')
+                    link_id = lr.get('link_id', '')
+                    ability_name = lr.get('ability_name', '')
 
-                for m in lr.get('matches', []):
-                    alerts_matched.append({
-                        # Vue 테이블에서 쓰기 좋은 형태로 필드명 정리
-                        'timestamp': m.get('@timestamp'),
-                        'rule_id': m.get('rule.id'),
-                        'rule_level': m.get('level'),
-                        'description': m.get('description'),
-                        'agent_name': m.get('agent.name'),
-                        'agent_id': m.get('agent.id'),
-                        'technique_id': tech or m.get('mitre.id'),
-                        # 어느 링크/ability에서 나온 탐지인지도 같이 제공
-                        'link_id': link_id,
-                        'ability_name': ability_name,
-                    })
+                    for m in lr.get('matches', []):
+                        try:
+                            alerts_matched.append({
+                                # Vue 테이블에서 쓰기 좋은 형태로 필드명 정리
+                                'timestamp': m.get('@timestamp') or m.get('timestamp'),
+                                'rule_id': m.get('rule.id') or m.get('rule_id'),
+                                'rule_level': m.get('level') or m.get('rule_level'),
+                                'description': m.get('description', ''),
+                                'agent_name': m.get('agent.name') or m.get('agent_name'),
+                                'agent_id': m.get('agent.id') or m.get('agent_id'),
+                                'technique_id': tech or m.get('mitre.id') or m.get('technique_id'),
+                                # 어느 링크/ability에서 나온 탐지인지도 같이 제공
+                                'link_id': link_id,
+                                'ability_name': ability_name,
+                                'match_status': 'MATCHED',
+                                'match_source': 'wazuh'
+                            })
+                        except Exception as alert_err:
+                            self.log.debug(f'[BASTION] 알림 처리 중 에러 (skip): {alert_err}')
+                            continue
+                except Exception as lr_err:
+                    self.log.debug(f'[BASTION] link_result 처리 중 에러 (skip): {lr_err}')
+                    continue
 
             # 6) 매칭 및 탐지율 계산 (기존 구조 그대로)
             matched_techniques = operation_techniques.intersection(detected_techniques)
@@ -1162,31 +1196,46 @@ class BASTIONService:
                             f"agent_id={sample.get('agent_id')}"
                         )
 
+                    # 인덱스 구축 (안전한 처리)
                     for ev in detection_events:
-                        ts = ev.get("timestamp")
-                        rule_id = str(ev.get("rule_id"))
-                        agent_id = str(ev.get("agent_id") or "")
-
-                        if not ts or not rule_id:
-                            continue
-
                         try:
-                            ev_dt = date_parser.parse(ts)
-                        except Exception:
-                            continue
+                            ts = ev.get("timestamp")
+                            rule_id = ev.get("rule_id")
+                            agent_id = ev.get("agent_id") or ""
 
-                        key = (rule_id, agent_id)
-                        index_by_rule_agent.setdefault(key, []).append((ev_dt, ev))
+                            if not ts or not rule_id:
+                                continue
+
+                            # timestamp 파싱 (안전한 처리)
+                            try:
+                                ev_dt = date_parser.parse(ts)
+                            except Exception:
+                                continue
+
+                            # 문자열로 변환해서 키로 사용 (int도 str로 통일, 공백 제거)
+                            rule_key = str(rule_id).strip()
+                            agent_key = str(agent_id).strip() if agent_id else ""
+                            key = (rule_key, agent_key)
+
+                            index_by_rule_agent.setdefault(key, []).append((ev_dt, ev))
+                        except Exception as idx_err:
+                            self.log.debug(f"[BASTION] 인덱스 구축 중 에러 (skip): {idx_err}")
+                            continue
 
                     # 정렬해두면 나중에 시간 차 계산할 때 조금 낫다
                     for key in index_by_rule_agent:
-                        index_by_rule_agent[key].sort(key=lambda x: x[0])
+                        try:
+                            index_by_rule_agent[key].sort(key=lambda x: x[0])
+                        except Exception:
+                            pass
 
                     self.log.info(
                         f"[BASTION DEBUG] 인덱스 구축 완료: {len(index_by_rule_agent)}개 키"
                     )
 
-                    THRESHOLD_SEC = 5  # ±5초 이내면 같은 이벤트로 본다
+                    # ±60초 이내면 같은 이벤트로 본다 (로그 전송 지연 고려)
+                    # 네트워크 지연, Wazuh 처리 시간, Elasticsearch 인덱싱 시간 등을 고려
+                    THRESHOLD_SEC = 60
                     total_matched = 0
 
                     self.log.info(
@@ -1201,6 +1250,10 @@ class BASTIONService:
                                 f"op={getattr(op, 'name', '')} ({getattr(op, 'id', '')})"
                             )
                             link_results = await self.integration_engine.correlate(op)
+
+                            if not link_results:
+                                self.log.info(f"[BASTION DEBUG] No link results for operation")
+                                continue
 
                             self.log.info(
                                 f"[BASTION DEBUG] IntegrationEngine 결과: {len(link_results)}개 링크"
@@ -1228,83 +1281,108 @@ class BASTIONService:
                         op_label = f"{op_name} ({op_id})" if (op_name or op_id) else op_id
 
                         for lr in link_results or []:
-                            link_id = lr.get("link_id")
+                            try:
+                                link_id = lr.get("link_id")
 
-                            for m in lr.get("matches", []):
-                                ts = m.get("@timestamp") or m.get("timestamp")
-                                if not ts:
-                                    continue
+                                for m in lr.get("matches", []):
+                                    try:
+                                        ts = m.get("@timestamp") or m.get("timestamp")
+                                        if not ts:
+                                            continue
 
-                                try:
-                                    m_dt = date_parser.parse(ts)
-                                except Exception:
-                                    continue
+                                        # timestamp 파싱
+                                        try:
+                                            m_dt = date_parser.parse(ts)
+                                        except Exception:
+                                            continue
 
-                                # rule_id 추출
-                                rule_id = str(
-                                    m.get("rule.id")
-                                    or m.get("rule_id")
-                                    or ""
-                                )
-                                if not rule_id:
-                                    continue
+                                        # rule_id 추출 (안전한 처리, 타입 통일)
+                                        rule_id = m.get("rule.id") or m.get("rule_id")
+                                        if not rule_id:
+                                            continue
 
-                                # agent_id 추출 (dict/flat 모두 대응)
-                                agent = m.get("agent") or {}
-                                if isinstance(agent, dict):
-                                    agent_id = str(agent.get("id") or "")
-                                else:
-                                    agent_id = str(
-                                        m.get("agent.id")
-                                        or m.get("agent_id")
-                                        or ""
-                                    )
+                                        # rule_id를 문자열로 통일 (int도 str로 변환)
+                                        rule_key = str(rule_id).strip()
 
-                                # 우선 (rule_id, agent_id) 키로 찾고,
-                                # agent_id가 없으면 rule_id만으로 fallback
-                                keys_to_try = []
-                                if agent_id:
-                                    keys_to_try.append((rule_id, agent_id))
-                                keys_to_try.append((rule_id, ""))  # fallback: agent 없이 rule만
+                                        # agent_id 추출 (dict/flat 모두 대응)
+                                        agent = m.get("agent") or {}
+                                        if isinstance(agent, dict):
+                                            agent_id = agent.get("id")
+                                        else:
+                                            agent_id = m.get("agent.id") or m.get("agent_id")
 
-                                matched_here = False
+                                        # agent_id도 문자열로 통일
+                                        agent_key = str(agent_id).strip() if agent_id else ""
 
-                                for key in keys_to_try:
-                                    candidates = index_by_rule_agent.get(key, [])
-                                    if not candidates:
+                                        # 매칭 시도 (여러 키 조합 - 우선순위 순서)
+                                        keys_to_try = []
+                                        if agent_key:
+                                            # 1순위: rule_id + agent_id 둘 다 일치
+                                            keys_to_try.append((rule_key, agent_key))
+                                        # 2순위: rule_id만 일치 (agent_id 무시)
+                                        keys_to_try.append((rule_key, ""))
+
+                                        matched_here = False
+                                        match_details = None
+
+                                        for key in keys_to_try:
+                                            candidates = index_by_rule_agent.get(key, [])
+                                            if not candidates:
+                                                continue
+
+                                            # 가장 가까운 이벤트 하나 찾기
+                                            best_ev = None
+                                            best_diff = None
+
+                                            for ev_dt, ev in candidates:
+                                                try:
+                                                    diff = abs((ev_dt - m_dt).total_seconds())
+                                                    if best_diff is None or diff < best_diff:
+                                                        best_diff = diff
+                                                        best_ev = ev
+                                                except Exception:
+                                                    continue
+
+                                            if best_ev is not None and best_diff is not None and best_diff <= THRESHOLD_SEC:
+                                                # 매칭 성공
+                                                best_ev["match_status"] = "MATCHED"
+                                                best_ev["attack_step_id"] = link_id
+                                                best_ev["match_source"] = "wazuh"
+                                                best_ev["opId"] = op_label
+                                                total_matched += 1
+                                                matched_here = True
+                                                match_details = f"diff={best_diff:.1f}s, key={key}"
+
+                                                if self.debug:
+                                                    self.log.info(
+                                                        f"[BASTION DEBUG] ✓ 매칭 성공: "
+                                                        f"rule_id={rule_key}, agent_id={agent_key}, "
+                                                        f"time_diff={best_diff:.1f}s, link={link_id}"
+                                                    )
+                                                break  # 이 match(m)는 더 이상 다른 key로 안 봐도 됨
+
+                                        if not matched_here:
+                                            # 매칭 실패 시 상세 정보 로깅
+                                            self.log.warning(
+                                                f"[BASTION] ✗ 매칭 실패: "
+                                                f"rule_id={rule_key}, agent_id={agent_key}, "
+                                                f"ts={ts}, link={link_id}, "
+                                                f"candidates={sum(len(index_by_rule_agent.get(k, [])) for k in keys_to_try)}"
+                                            )
+                                    except Exception as match_err:
+                                        self.log.debug(f"[BASTION] 개별 매칭 에러 (skip): {match_err}")
                                         continue
-
-                                    # 가장 가까운 이벤트 하나 찾기
-                                    best_ev = None
-                                    best_diff = None
-
-                                    for ev_dt, ev in candidates:
-                                        diff = abs((ev_dt - m_dt).total_seconds())
-                                        if best_diff is None or diff < best_diff:
-                                            best_diff = diff
-                                            best_ev = ev
-
-                                    if best_ev is not None and best_diff is not None and best_diff <= THRESHOLD_SEC:
-                                        # 매칭 성공
-                                        best_ev["match_status"] = "MATCHED"
-                                        best_ev["attack_step_id"] = link_id
-                                        best_ev["match_source"] = "wazuh"
-                                        best_ev["opId"] = op_label
-                                        total_matched += 1
-                                        matched_here = True
-                                        break  # 이 match(m)는 더 이상 다른 key로 안 봐도 됨
-
-                                if not matched_here:
-                                    self.log.debug(
-                                        f"[BASTION DEBUG] match 미매칭: "
-                                        f"rule_id={rule_id}, agent_id={agent_id}, ts={ts}"
-                                    )
+                            except Exception as link_err:
+                                self.log.debug(f"[BASTION] 링크 처리 에러 (skip): {link_err}")
+                                continue
 
                     self.log.info(
                         f"[BASTION] dashboard correlation matched events: {total_matched}"
                     )
             except Exception as e:
                 self.log.warning(f"[BASTION] dashboard correlation 반영 실패: {e}")
+                import traceback
+                traceback.print_exc()
 
             # 🔻 op 필터 있을 때: 오퍼레이션 시간 범위 내 모든 탐지 표시 (MATCHED 여부 관계없이)
             # 사용자가 어떤 탐지가 매칭되었고 안되었는지 확인할 수 있도록 함

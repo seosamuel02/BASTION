@@ -142,22 +142,46 @@ class IntegrationEngine:
     # Operation Events
     # ------------------
     def _event_from_link(self, link) -> dict:
-        ability = getattr(link, 'ability', None)
-        technique_id = getattr(ability, 'technique_id', None) if ability else None
-        ability_name = getattr(ability, 'name', '') if ability else ''
-        ts_dt = getattr(link, 'finish', None) or getattr(link, 'start', None) or getattr(link, 'decide', None)
-        command = getattr(link, 'command', None)
-        pid = getattr(link, 'pid', None)
+        """링크 정보를 이벤트 딕셔너리로 변환 (안전한 처리)"""
+        try:
+            ability = getattr(link, 'ability', None)
+            technique_id = getattr(ability, 'technique_id', None) if ability else None
+            ability_name = getattr(ability, 'name', '') if ability else ''
+            ts_dt = getattr(link, 'finish', None) or getattr(link, 'start', None) or getattr(link, 'decide', None)
+            command = getattr(link, 'command', None)
+            pid = getattr(link, 'pid', None)
 
-        return {
-            'link_id': str(getattr(link, 'id', '')),
-            'ability_name': ability_name,
-            'technique_id': technique_id,
-            'executed_at': _iso(ts_dt),
-            'timestamp': ts_dt.timestamp() if hasattr(ts_dt, 'timestamp') else (float(ts_dt) if ts_dt else None),
-            'command': command.decode('utf-8', errors='ignore') if isinstance(command, (bytes, bytearray)) else command,
-            'pid': pid,
-        }
+            # timestamp 안전하게 처리
+            timestamp = None
+            if ts_dt:
+                try:
+                    if hasattr(ts_dt, 'timestamp'):
+                        timestamp = ts_dt.timestamp()
+                    elif isinstance(ts_dt, (int, float)):
+                        timestamp = float(ts_dt)
+                except Exception:
+                    timestamp = None
+
+            return {
+                'link_id': str(getattr(link, 'id', '')),
+                'ability_name': ability_name or '',
+                'technique_id': technique_id or '',
+                'executed_at': _iso(ts_dt),
+                'timestamp': timestamp,
+                'command': command.decode('utf-8', errors='ignore') if isinstance(command, (bytes, bytearray)) else (command or ''),
+                'pid': pid,
+            }
+        except Exception as e:
+            # 최소한의 정보라도 반환
+            return {
+                'link_id': str(getattr(link, 'id', '')) if link else '',
+                'ability_name': '',
+                'technique_id': '',
+                'executed_at': None,
+                'timestamp': None,
+                'command': '',
+                'pid': None,
+            }
 
     async def collect_operation_events(self, operation) -> list[dict]:
         events = []
@@ -170,19 +194,31 @@ class IntegrationEngine:
     # Indexer Querying (개선됨)
     # ------------------
     def _build_query(self, technique_id: str, center_ts: float) -> dict:
-        """개선된 쿼리 빌더 - 더 넓은 시간 윈도우와 다양한 필드 검색"""
-        # 시간 윈도우 설정 (기본: 7200초 = 2시간)
-        window_sec = int(self.match.get('time_window_sec', self.config.get('time_window_sec', 7200)))
+        """개선된 쿼리 빌더 - 더 넓은 시간 윈도우와 다양한 필드 검색 (안전한 처리)"""
+        try:
+            # 시간 윈도우 설정 (기본: 7200초 = 2시간)
+            window_sec = int(self.match.get('time_window_sec', self.config.get('time_window_sec', 7200)))
 
-        # Unix timestamp를 UTC datetime으로 변환
-        center = datetime.fromtimestamp(center_ts, tz=timezone.utc)
-        gte = (center - timedelta(seconds=window_sec)).isoformat()
-        lte = (center + timedelta(seconds=window_sec)).isoformat()
+            # Unix timestamp를 UTC datetime으로 변환 (안전하게)
+            try:
+                center = datetime.fromtimestamp(center_ts, tz=timezone.utc)
+            except (ValueError, OSError, OverflowError):
+                # timestamp가 유효하지 않으면 현재 시간 사용
+                center = datetime.now(tz=timezone.utc)
 
-        if self.debug:
-            print(f"[DEBUG] Time window: {window_sec} seconds (±{window_sec/3600:.1f} hours)")
-            print(f"[DEBUG] Center timestamp: {center_ts} → {center}")
-            print(f"[DEBUG] Search range: {gte} to {lte}")
+            gte = (center - timedelta(seconds=window_sec)).isoformat()
+            lte = (center + timedelta(seconds=window_sec)).isoformat()
+
+            if self.debug:
+                print(f"[DEBUG] Time window: {window_sec} seconds (±{window_sec/3600:.1f} hours)")
+                print(f"[DEBUG] Center timestamp: {center_ts} → {center}")
+                print(f"[DEBUG] Search range: {gte} to {lte}")
+        except Exception as time_err:
+            if self.debug:
+                print(f"[DEBUG] Time window setup error: {time_err}")
+            # fallback: 최근 2시간 검색
+            gte = "now-2h"
+            lte = "now+2h"
 
         # MITRE 필드들 - 더 많은 변형 추가
         mitre_fields = self.match.get('mitre_fields') or [
@@ -273,95 +309,173 @@ class IntegrationEngine:
         return None
 
     def _summarize_hit(self, hit: dict) -> dict:
-        src = hit.get('_source', {}) or {}
-        doc_id = hit.get('_id')
-        rule = src.get('rule') if isinstance(src.get('rule'), dict) else {}
-        
-        # data.mitre 처리
-        data_mitre = src.get('data', {}).get('mitre', {}) if isinstance(src.get('data'), dict) else {}
-        
-        # rule.mitre 처리 (list일 수 있음)
-        raw_rule_mitre = rule.get('mitre')
-        if isinstance(raw_rule_mitre, list) and raw_rule_mitre:
-            rule_mitre = raw_rule_mitre[0] if isinstance(raw_rule_mitre[0], dict) else {}
-        elif isinstance(raw_rule_mitre, dict):
-            rule_mitre = raw_rule_mitre
-        else:
-            rule_mitre = {}
+        """Elasticsearch/OpenSearch hit를 요약 (안전한 처리)"""
+        try:
+            if not hit or not isinstance(hit, dict):
+                return {}
 
-        agent = src.get('agent') if isinstance(src.get('agent'), dict) else {}
+            src = hit.get('_source', {}) or {}
+            doc_id = hit.get('_id')
 
-        # timestamp 우선순위: @timestamp > timestamp
-        ts = src.get('@timestamp') or src.get('timestamp')
+            # rule 처리
+            rule = src.get('rule')
+            if not isinstance(rule, dict):
+                rule = {}
 
-        return {
-            'doc_id': doc_id,
-            '@timestamp': ts,
+            # data.mitre 처리
+            data = src.get('data')
+            if isinstance(data, dict):
+                data_mitre = data.get('mitre', {})
+                if not isinstance(data_mitre, dict):
+                    data_mitre = {}
+            else:
+                data_mitre = {}
 
-            # 룰/레벨
-            'rule.id': rule.get('id') or src.get('rule.id'),
-            'level': rule.get('level') or src.get('rule.level') or src.get('level'),
+            # rule.mitre 처리 (list일 수 있음)
+            raw_rule_mitre = rule.get('mitre')
+            if isinstance(raw_rule_mitre, list) and raw_rule_mitre:
+                rule_mitre = raw_rule_mitre[0] if isinstance(raw_rule_mitre[0], dict) else {}
+            elif isinstance(raw_rule_mitre, dict):
+                rule_mitre = raw_rule_mitre
+            else:
+                rule_mitre = {}
 
-            # MITRE - 여러 경로 시도 (배열인 경우 첫 번째 요소 추출)
-            'mitre.id': self._extract_mitre_id(
-                data_mitre.get('id'),
-                rule_mitre.get('id'),
-                src.get('mitre.id'),
-                src.get('rule.mitre.id')
-            ),
-            'mitre.tactic': (
+            # agent 처리
+            agent = src.get('agent')
+            if not isinstance(agent, dict):
+                agent = {}
+
+            # timestamp 우선순위: @timestamp > timestamp
+            ts = src.get('@timestamp') or src.get('timestamp')
+
+            # MITRE ID 추출 (안전하게)
+            mitre_id = None
+            try:
+                mitre_id = self._extract_mitre_id(
+                    data_mitre.get('id'),
+                    rule_mitre.get('id'),
+                    src.get('mitre.id'),
+                    src.get('rule.mitre.id')
+                )
+            except Exception:
+                mitre_id = None
+
+            # MITRE tactic 추출
+            mitre_tactic = (
                 data_mitre.get('tactic') or
                 rule_mitre.get('tactic') or
                 src.get('mitre.tactic') or
                 src.get('rule.mitre.tactic')
-            ),
+            )
 
-            # 에이전트 정보
-            'agent.id': agent.get('id') or src.get('agent.id'),
-            'agent.name': agent.get('name') or src.get('agent.name'),
-
-            # 기타
-            'description': (
+            # description 추출
+            description = (
                 rule.get('description') or
                 src.get('rule.description') or
                 src.get('message') or
-                src.get('full_log')
-            ),
-            'data.audit.type': src.get('data', {}).get('audit', {}).get('type') if isinstance(src.get('data'), dict) else None,
-            'data.audit.exe': src.get('data', {}).get('audit', {}).get('exe') if isinstance(src.get('data'), dict) else None,
-        }
+                src.get('full_log') or
+                ''
+            )
+
+            return {
+                'doc_id': doc_id,
+                '@timestamp': ts,
+
+                # 룰/레벨
+                'rule.id': rule.get('id') or src.get('rule.id'),
+                'level': rule.get('level') or src.get('rule.level') or src.get('level'),
+
+                # MITRE - 여러 경로 시도
+                'mitre.id': mitre_id,
+                'mitre.tactic': mitre_tactic,
+
+                # 에이전트 정보
+                'agent.id': agent.get('id') or src.get('agent.id'),
+                'agent.name': agent.get('name') or src.get('agent.name'),
+
+                # 기타
+                'description': description,
+                'data.audit.type': data.get('audit', {}).get('type') if isinstance(data, dict) and isinstance(data.get('audit'), dict) else None,
+                'data.audit.exe': data.get('audit', {}).get('exe') if isinstance(data, dict) and isinstance(data.get('audit'), dict) else None,
+            }
+        except Exception as e:
+            if self.debug:
+                print(f"[DEBUG] _summarize_hit failed: {e}")
+            return {}
 
     def _search(self, technique_id: str, ts_epoch: float) -> list[dict]:
-        """검색 수행 및 디버그 정보 출력"""
-        if not technique_id or not ts_epoch:
+        """검색 수행 및 디버그 정보 출력 (안전한 처리)"""
+        # 입력값 검증
+        if not technique_id:
             if self.debug:
-                print(f"[DEBUG] Skipping search - technique_id: {technique_id}, ts_epoch: {ts_epoch}")
+                print(f"[DEBUG] Skipping search - no technique_id")
             return []
-        
+
+        if not ts_epoch or not isinstance(ts_epoch, (int, float)):
+            if self.debug:
+                print(f"[DEBUG] Skipping search - invalid ts_epoch: {ts_epoch}")
+            return []
+
+        # 클라이언트 존재 확인
+        if not self.client:
+            if self.debug:
+                print(f"[DEBUG] No client available")
+            return []
+
         index = self.wazuh.get('index_pattern') or self.config.get('index', 'wazuh-alerts-4.x-*')
-        body = self._build_query(technique_id, ts_epoch)
-        
+
+        try:
+            body = self._build_query(technique_id, ts_epoch)
+        except Exception as query_err:
+            if self.debug:
+                print(f"[DEBUG] Query build failed: {query_err}")
+            return []
+
         try:
             if self.debug:
                 print(f"\n[DEBUG] Searching index: {index}")
                 print(f"[DEBUG] Technique: {technique_id}")
-                print(f"[DEBUG] Timestamp: {datetime.fromtimestamp(ts_epoch, tz=timezone.utc)}")
-            
+                try:
+                    print(f"[DEBUG] Timestamp: {datetime.fromtimestamp(ts_epoch, tz=timezone.utc)}")
+                except Exception:
+                    print(f"[DEBUG] Timestamp: {ts_epoch} (raw)")
+
             resp = self.client.search(index=index, body=body)
+
+            if not resp:
+                if self.debug:
+                    print(f"[DEBUG] Empty response from search")
+                return []
+
             hits = resp.get('hits', {}).get('hits', [])
-            
+
             if self.debug:
                 print(f"[DEBUG] Found {len(hits)} hits")
                 if hits:
-                    print("[DEBUG] Sample hit:")
-                    sample = hits[0].get('_source', {})
-                    print(f"  - rule.id: {sample.get('rule', {}).get('id')}")
-                    print(f"  - timestamp: {sample.get('@timestamp') or sample.get('timestamp')}")
-                    print(f"  - data.mitre.id: {sample.get('data', {}).get('mitre', {}).get('id')}")
-                    print(f"  - rule.mitre: {sample.get('rule', {}).get('mitre')}")
-            
-            return [self._summarize_hit(h) for h in hits]
-            
+                    try:
+                        print("[DEBUG] Sample hit:")
+                        sample = hits[0].get('_source', {})
+                        print(f"  - rule.id: {sample.get('rule', {}).get('id')}")
+                        print(f"  - timestamp: {sample.get('@timestamp') or sample.get('timestamp')}")
+                        print(f"  - data.mitre.id: {sample.get('data', {}).get('mitre', {}).get('id')}")
+                        print(f"  - rule.mitre: {sample.get('rule', {}).get('mitre')}")
+                    except Exception:
+                        pass
+
+            # 결과 처리 (안전하게)
+            results = []
+            for h in hits:
+                try:
+                    summarized = self._summarize_hit(h)
+                    if summarized:
+                        results.append(summarized)
+                except Exception as sum_err:
+                    if self.debug:
+                        print(f"[DEBUG] Failed to summarize hit: {sum_err}")
+                    continue
+
+            return results
+
         except Exception as e:
             if self.debug:
                 print(f"[DEBUG] Search failed: {e}")
@@ -370,54 +484,91 @@ class IntegrationEngine:
             return []
 
     async def correlate(self, operation) -> list[dict]:
-        """작업의 각 링크에 대해 Wazuh 알림과 상관분석"""
-        loop = asyncio.get_event_loop()
-        results = []
-        chain = getattr(operation, 'chain', [])
-        
-        if self.debug:
-            print(f"\n[DEBUG] ========== Correlation Start ==========")
-            print(f"[DEBUG] Operation: {getattr(operation, 'name', 'Unknown')}")
-            print(f"[DEBUG] Total links: {len(chain)}")
-        
-        for idx, link in enumerate(chain, 1):
-            ability = getattr(link, 'ability', None)
-            technique_id = getattr(ability, 'technique_id', None) if ability else None
-            ability_name = getattr(ability, 'name', '') if ability else ''
+        """작업의 각 링크에 대해 Wazuh 알림과 상관분석 (안전한 처리)"""
+        try:
+            loop = asyncio.get_event_loop()
+            results = []
+            chain = getattr(operation, 'chain', [])
 
-            ts_raw = getattr(link, 'finish', None) or getattr(link, 'start', None) or getattr(link, 'decide', None)
-            ts_dt = _to_dt(ts_raw)
-            ts_epoch = ts_dt.timestamp() if ts_dt else None
+            if not chain:
+                if self.debug:
+                    print(f"[DEBUG] Operation {getattr(operation, 'name', 'Unknown')}: No chain links")
+                return []
 
             if self.debug:
-                print(f"\n[DEBUG] --- Link {idx}/{len(chain)} ---")
-                print(f"[DEBUG] Ability: {ability_name}")
-                print(f"[DEBUG] Technique: {technique_id}")
-                print(f"[DEBUG] Timestamp: {ts_dt} ({ts_epoch})")
+                print(f"\n[DEBUG] ========== Correlation Start ==========")
+                print(f"[DEBUG] Operation: {getattr(operation, 'name', 'Unknown')}")
+                print(f"[DEBUG] Total links: {len(chain)}")
 
-            matches = []
-            if technique_id and ts_epoch:
-                matches = await loop.run_in_executor(None, self._search, technique_id, ts_epoch)
-                
-                if self.debug:
-                    print(f"[DEBUG] Matches found: {len(matches)}")
-            else:
-                if self.debug:
-                    print(f"[DEBUG] Skipped - missing technique_id or timestamp")
+            for idx, link in enumerate(chain, 1):
+                try:
+                    ability = getattr(link, 'ability', None)
+                    technique_id = getattr(ability, 'technique_id', None) if ability else None
+                    ability_name = getattr(ability, 'name', '') if ability else ''
 
-            results.append({
-                'link_id': str(getattr(link, 'id', '')),
-                'ability_name': ability_name,
-                'technique_id': technique_id,
-                'executed_at': _iso(ts_dt) if ts_dt else None,
-                'detected': len(matches) > 0,
-                'match_count': len(matches),
-                'matches': matches
-            })
-        
-        if self.debug:
-            detected_count = sum(1 for r in results if r['detected'])
-            print(f"\n[DEBUG] ========== Correlation End ==========")
-            print(f"[DEBUG] Total: {len(results)}, Detected: {detected_count}")
-        
-        return results
+                    ts_raw = getattr(link, 'finish', None) or getattr(link, 'start', None) or getattr(link, 'decide', None)
+                    ts_dt = _to_dt(ts_raw)
+                    ts_epoch = ts_dt.timestamp() if ts_dt else None
+
+                    if self.debug:
+                        print(f"\n[DEBUG] --- Link {idx}/{len(chain)} ---")
+                        print(f"[DEBUG] Ability: {ability_name}")
+                        print(f"[DEBUG] Technique: {technique_id}")
+                        print(f"[DEBUG] Timestamp: {ts_dt} ({ts_epoch})")
+
+                    matches = []
+                    if technique_id and ts_epoch:
+                        try:
+                            matches = await loop.run_in_executor(None, self._search, technique_id, ts_epoch)
+
+                            if self.debug:
+                                if matches:
+                                    print(f"[DEBUG] ✓ Matches found: {len(matches)}")
+                                    for m in matches[:3]:  # 처음 3개만 샘플 출력
+                                        print(f"  - rule.id={m.get('rule.id')}, ts={m.get('@timestamp')}")
+                                else:
+                                    print(f"[DEBUG] ✗ No matches found for technique={technique_id}")
+                        except Exception as search_err:
+                            if self.debug:
+                                print(f"[DEBUG] ✗ Search error: {search_err}")
+                            matches = []
+                    else:
+                        if self.debug:
+                            reason = "no technique_id" if not technique_id else "no timestamp"
+                            print(f"[DEBUG] ⊘ Skipped - {reason}")
+
+                    results.append({
+                        'link_id': str(getattr(link, 'id', '')),
+                        'ability_name': ability_name or '',
+                        'technique_id': technique_id or '',
+                        'executed_at': _iso(ts_dt) if ts_dt else None,
+                        'detected': len(matches) > 0,
+                        'match_count': len(matches),
+                        'matches': matches
+                    })
+                except Exception as link_err:
+                    if self.debug:
+                        print(f"[DEBUG] Error processing link {idx}: {link_err}")
+                    # 에러가 나도 최소한의 정보 추가
+                    results.append({
+                        'link_id': str(getattr(link, 'id', '')) if link else f'error_{idx}',
+                        'ability_name': '',
+                        'technique_id': '',
+                        'executed_at': None,
+                        'detected': False,
+                        'match_count': 0,
+                        'matches': []
+                    })
+
+            if self.debug:
+                detected_count = sum(1 for r in results if r.get('detected', False))
+                print(f"\n[DEBUG] ========== Correlation End ==========")
+                print(f"[DEBUG] Total: {len(results)}, Detected: {detected_count}")
+
+            return results
+        except Exception as e:
+            if self.debug:
+                print(f"[DEBUG] Critical error in correlate: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
