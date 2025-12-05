@@ -1,9 +1,22 @@
-# CWIP (Caldera-Wazuh Integration Plugin) Dependencies
-# Caldera 기본 의존성은 이미 설치되어 있음 (aiohttp, pyyaml 등)
+# BASTION Plugin Dependencies
+# =================================
+# These are additional dependencies required by the BASTION plugin.
+# Core Caldera dependencies (aiohttp, pyyaml, etc.) are already installed.
 
-# Elasticsearch/OpenSearch 클라이언트 (IntegrationEngine용)
+# OpenSearch/Elasticsearch client for IntegrationEngine
+# Used for querying Wazuh Indexer alerts
 opensearch-py>=2.0.0
 
-# 추가 의존성
-# aiohttp는 Caldera에 포함됨
-# asyncio는 Python 표준 라이브러리
+# Date/time parsing utilities
+python-dateutil>=2.8.0
+
+# Development dependencies (for testing)
+# --------------------------------------
+# pytest>=7.0.0
+# pytest-asyncio>=0.23.0
+# pytest-aiohttp>=1.0.0
+# pytest-cov>=4.0.0
+# coverage>=7.0.0
+# flake8>=7.0.0
+# pre-commit>=3.0.0
+# tox>=4.0.0
