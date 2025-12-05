@@ -1,2 +1,44 @@
 .claude/settings.local.json
 bastion/.env
+
+# Claude Code specific files
+CLAUDE.md
+PR_PREPARATION.md
+.mcp.json
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test/Coverage
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+
+# Temp
+*.tmp
+nul
