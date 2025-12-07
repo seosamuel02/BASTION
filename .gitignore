@@ -42,3 +42,4 @@ htmlcov/
 # Temp
 *.tmp
 nul
+bastion/docker-compose.override.yml
