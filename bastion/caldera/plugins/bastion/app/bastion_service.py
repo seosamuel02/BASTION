@@ -200,15 +200,51 @@ class BASTIONService:
         self.knowledge_svc = services.get('knowledge_svc')
         self.log = self.app_svc.log if self.app_svc else logging.getLogger('bastion')
 
-        # Wazuh Configuration
-        self.manager_url = os.getenv('WAZUH_MANAGER_URL', config.get('wazuh_manager_url', 'https://localhost:55000'))
-        self.indexer_url = os.getenv('WAZUH_INDEXER_URL', config.get('wazuh_indexer_url', 'https://localhost:9200'))
-        self.username = os.getenv('WAZUH_USERNAME', config.get('wazuh_username', 'wazuh'))
-        self.password = os.getenv('WAZUH_PASSWORD', config.get('wazuh_password', ''))
-        
-        self.indexer_username = os.getenv('WAZUH_INDEXER_USERNAME', config.get('indexer_username', 'admin'))
-        self.indexer_password = os.getenv('WAZUH_INDEXER_PASSWORD', config.get('indexer_password', ''))
-        
+        # Wazuh configuration (env > config fallback)
+        self.manager_url = os.getenv(
+            'WAZUH_MANAGER_URL',
+            config.get('wazuh_manager_url', 'https://localhost:55000')
+        )
+
+        self.indexer_url = os.getenv(
+            'WAZUH_INDEXER_URL',
+            config.get('wazuh_indexer_url', 'https://localhost:9200')
+        )
+
+        self.indexer_username = os.getenv(
+            'WAZUH_INDEXER_USERNAME',
+            config.get('wazuh_indexer_username', 'admin')
+        )
+
+        self.indexer_password = os.getenv(
+            'WAZUH_INDEXER_PASSWORD',
+            config.get('wazuh_indexer_password', '')
+        )
+
+        self.username = os.getenv(
+            'WAZUH_USERNAME',
+            config.get('wazuh_username', 'wazuh')
+        )
+        self.password = os.getenv(
+            'WAZUH_PASSWORD',
+            config.get('wazuh_password', 'wazuh')
+        )
+
+        # Elasticsearch configuration (Discover) (env > config fallback)
+        self.elastic_url = os.getenv(
+            'ELASTIC_URL',
+            config.get('elastic_url', 'http://elasticsearch:9200')
+        )
+        self.elastic_username = os.getenv(
+            'ELASTIC_USERNAME',
+            config.get('elastic_username', 'elastic')
+        )
+        self.elastic_password = os.getenv(
+            'ELASTIC_PASSWORD',
+            config.get('elastic_password', 'changeme')
+        )
+
+
         self.verify_ssl = config.get('verify_ssl', False)
         if os.getenv('WAZUH_VERIFY_SSL'):
             self.verify_ssl = os.getenv('WAZUH_VERIFY_SSL').lower() in ('true', '1', 'yes')
@@ -269,6 +305,133 @@ class BASTIONService:
             self.log.error(f'[BASTION] Wazuh authentication error: {e}')
             raise
 
+    # -----------------------------
+    # Elasticsearch (Discover 용)
+    # -----------------------------
+    async def get_es_indices(self, request: web.Request) -> web.Response:
+        """
+        Elasticsearch 인덱스 목록 반환 (Discover용)
+        """
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
+            auth = aiohttp.BasicAuth(self.elastic_username, self.elastic_password)
+            url = f'{self.elastic_url}/_cat/indices?format=json&h=index'
+
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                async with session.get(url, auth=auth) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise Exception(f'ES indices 호출 실패 (HTTP {resp.status}): {text}')
+                    data = await resp.json()
+                    indices = [item.get('index') for item in data if item.get('index')]
+                    # 중복 제거 + 정렬
+                    unique = sorted(set(indices))
+                    return web.json_response(unique)
+        except Exception as e:
+            self.log.error(f'[BASTION] ES 인덱스 조회 실패: {e}')
+            return web.json_response({'error': str(e)}, status=500)
+
+    async def search_es(self, request: web.Request) -> web.Response:
+        """
+        Elasticsearch 검색 프록시 (Discover용)
+        Body: { index, kql, timeRange:{from,to}, filters:[{field,operator,value}] }
+        """
+        try:
+            payload = await request.json()
+            index = payload.get('index') or '*'
+            kql = payload.get('kql') or ''
+            time_range = payload.get('timeRange') or {}
+            filters = payload.get('filters') or []
+
+            query = self._build_es_query(kql, time_range, filters)
+            body = {
+                'query': query,
+                'size': 200,
+                'sort': [
+                    {'@timestamp': {'order': 'desc'}}
+                ]
+            }
+
+            timeout = aiohttp.ClientTimeout(total=20)
+            connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
+            auth = aiohttp.BasicAuth(self.elastic_username, self.elastic_password)
+            url = f'{self.elastic_url}/{index}/_search'
+
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                async with session.post(url, auth=auth, json=body) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise Exception(f'ES search 실패 (HTTP {resp.status}): {text}')
+                    data = await resp.json()
+                    hits = data.get('hits', {}).get('hits', [])
+                    rows = []
+                    columns = set()
+                    for hit in hits:
+                        source = hit.get('_source', {}) or {}
+                        doc_id = hit.get('_id')
+                        if doc_id:
+                            source['id'] = doc_id
+                        rows.append(source)
+                        columns.update(source.keys())
+                    columns = sorted(list(columns))
+                    result = {
+                        'total': data.get('hits', {}).get('total', {}).get('value', len(rows)),
+                        'columns': columns,
+                        'rows': rows
+                    }
+                    return web.json_response(result)
+        except Exception as e:
+            self.log.error(f'[BASTION] ES 검색 실패: {e}')
+            return web.json_response({'error': str(e)}, status=500)
+
+    def _build_es_query(self, kql: str, time_range: Dict[str, str], filters: List[Dict[str, str]]):
+        """
+        키바나 KQL을 단순 query_string으로 래핑하고, 필드 필터/시간 범위를 bool.must에 추가
+        """
+        must_clauses = []
+        must_not_clauses = []
+
+        # KQL -> query_string (간단 위임)
+        if kql:
+            must_clauses.append({
+                'query_string': {
+                    'query': kql
+                }
+            })
+
+        # 시간 범위 (@timestamp 기준)
+        time_from = (time_range or {}).get('from')
+        time_to = (time_range or {}).get('to')
+        if time_from or time_to:
+            range_query = {'range': {'@timestamp': {}}}
+            if time_from:
+                range_query['range']['@timestamp']['gte'] = time_from
+            if time_to:
+                range_query['range']['@timestamp']['lte'] = time_to
+            must_clauses.append(range_query)
+
+        # 필드 필터
+        for f in filters or []:
+            field = f.get('field')
+            op = (f.get('operator') or '').lower()
+            value = f.get('value')
+            if not field or value is None:
+                continue
+            if op == 'is not':
+                must_not_clauses.append({'term': {field: value}})
+            elif op == 'contains':
+                must_clauses.append({'wildcard': {field: f'*{value}*'}})
+            else:  # default 'is'
+                must_clauses.append({'term': {field: value}})
+
+        return {
+            'bool': {
+                'must': must_clauses or [{'match_all': {}}],
+                'must_not': must_not_clauses
+            }
+        }
+
     async def _ensure_authenticated(self):
         """Check token validity and re-authenticate if needed"""
         if not self.token or not self.token_expiry:
@@ -297,12 +460,12 @@ class BASTIONService:
                     "bool": {
                         "must": [
                             {"range": {"rule.level": {"gte": min_level}}},
-                            {"range": {"timestamp": {"gte": f"now-{hours}h"}}}
+                            {"range": {"@timestamp": {"gte": f"now-{hours}h"}}}
                         ]
                     }
                 },
                 "size": 100,
-                "sort": [{"timestamp": {"order": "desc"}}],
+                "sort": [{"@timestamp": {"order": "desc"}}],
                 "_source": [
                 "@timestamp","timestamp",
                 "rule.id", "rule.level", "rule.description",
@@ -764,13 +927,13 @@ class BASTIONService:
                             "bool": {
                                 "must": [
                                     {"range": {"rule.level": {"gte": 5}}},
-                                    {"range": {"timestamp": {"gte": f"now-{hours}h"}}},
+                                    {"range": {"@timestamp": {"gte": f"now-{hours}h"}}},
                                     {"term": {"agent.id": wazuh_agent['id']}}
                                 ]
                             }
                         },
                         "size": 10,
-                        "sort": [{"timestamp": {"order": "desc"}}],
+                        "sort": [{"@timestamp": {"order": "desc"}}],
                         "_source": [
                         "@timestamp", "timestamp",
                         "rule.id", "rule.level", "rule.description",
@@ -1259,7 +1422,7 @@ class BASTIONService:
 
                     time_range_query = {
                         "range": {
-                            "timestamp": {
+                            "@timestamp": {
                                 "gte": query_start,
                                 "lte": query_end
                             }
@@ -1271,10 +1434,10 @@ class BASTIONService:
                     )
                 else:
                     # Use default range if no start time
-                    time_range_query = {"range": {"timestamp": {"gte": f"now-{hours}h"}}}
+                    time_range_query = {"range": {"@timestamp": {"gte": f"now-{hours}h"}}}
             else:
                 # Use default time range if no operation filter
-                time_range_query = {"range": {"timestamp": {"gte": f"now-{hours}h"}}}
+                time_range_query = {"range": {"@timestamp": {"gte": f"now-{hours}h"}}}
 
             query = {
                 "query": {
@@ -1286,7 +1449,7 @@ class BASTIONService:
                     }
                 },
                 "size": 1000,
-                "sort": [{"timestamp": {"order": "asc"}}],
+                "sort": [{"@timestamp": {"order": "asc"}}],
                 "_source": [
                     "@timestamp",
                     "timestamp",
