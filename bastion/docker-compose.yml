@@ -1,3 +1,4 @@
+# docker-compose.yml
 # BASTION - Caldera-Wazuh Integration Platform
 # Unified Docker Compose for development
 
@@ -98,6 +99,8 @@ services:
       - WAZUH_PASSWORD=MyS3cur3P@ssw0rd!
       - WAZUH_INDEXER_USERNAME=elastic
       - WAZUH_INDEXER_PASSWORD=Kimdong2024
+      - ELASTIC_USERNAME=${ELASTIC_USERNAME}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     volumes:
       # BASTION plugin configuration
       - ./caldera/conf/local.yml:/usr/src/app/conf/local.yml
@@ -106,7 +109,7 @@ services:
       # BASTION integration engine config
       - ./caldera/plugins/bastion/app/conf/default.yml:/usr/src/app/plugins/bastion/app/conf/default.yml
       # BASTION plugin source code (for hot-reload development)
-      # - ./caldera/plugins/bastion:/usr/src/app/plugins/bastion
+      - ./caldera/plugins/bastion:/usr/src/app/plugins/bastion
       # ⚠️ Disabled to preserve opensearch-py installed by Dockerfile
       # Persist Caldera data
       - caldera_data:/usr/src/app/data
