@@ -1098,7 +1098,8 @@ class BASTIONService:
                 "_source": [
                     "@timestamp", "timestamp", "rule.id", "rule.level", "rule.description",
                     "data.mitre", "data.mitre.id", "data.mitre.tactic",
-                    "agent.id", "agent.name", "rule.mitre.technique", "rule.mitre.id"
+                    "agent.id", "agent.name", "rule.mitre.technique", "rule.mitre.id",
+                    "full_log", "data", "syscheck", "predecoder", "decoder", "location"
                 ]
             }
 
@@ -1164,6 +1165,19 @@ class BASTIONService:
                             agent_id = source.get('agent', {}).get('id')
                             agent_os = wazuh_agent_os_map.get(agent_id, 'unknown')
 
+                            # Extract raw event data for detail view
+                            raw_data = source.get('data', {})
+                            syscheck_data = source.get('syscheck', {})
+
+                            # Build full_log or reconstruct from data
+                            full_log = source.get('full_log', '')
+                            if not full_log and raw_data:
+                                # Try to extract command/process info from data
+                                if isinstance(raw_data, dict):
+                                    audit = raw_data.get('audit', {})
+                                    if isinstance(audit, dict):
+                                        full_log = audit.get('command', '') or audit.get('exe', '')
+
                             detection_events.append({
                                 'doc_id': doc_id,
                                 'timestamp': ts,
@@ -1179,6 +1193,13 @@ class BASTIONService:
                                 'attack_step_id': None,
                                 'match_source': 'wazuh',
                                 'opId': None,
+                                # Additional raw event data for detail view
+                                'full_log': full_log,
+                                'raw_data': raw_data if isinstance(raw_data, dict) else {},
+                                'syscheck': syscheck_data if isinstance(syscheck_data, dict) else {},
+                                'location': source.get('location', ''),
+                                'predecoder': source.get('predecoder', {}),
+                                'decoder': source.get('decoder', {}),
                             })
 
             # 3-A. Reflect match info to detection_events based on IntegrationEngine
@@ -1547,13 +1568,44 @@ class BASTIONService:
 
         - Collect simulated technique stats from Caldera operation links
         - Count detected techniques by querying Wazuh Indexer alerts
+        - Supports filters: operation_id, os_filter, search
         """
         try:
             hours = int(request.query.get('hours', 24))
-            self.log.info(f'[BASTION] Technique coverage analysis: Last {hours} hours')
+            operation_id = request.query.get('operation_id')
+            os_filter = request.query.get('os_filter')
+            search = request.query.get('search', '').lower()
+
+            self.log.info(
+                f'[BASTION] Technique coverage analysis: Last {hours} hours, '
+                f'operation_id={operation_id}, os_filter={os_filter}, search={search}'
+            )
 
             now_utc = datetime.utcnow()
             cutoff_time = now_utc - timedelta(hours=hours)
+
+            # Build agent platform map and filter by OS
+            all_agents = await self.data_svc.locate('agents')
+            agent_platforms = {}
+            filtered_agent_paws = set()
+
+            for agent in all_agents:
+                platform = getattr(agent, 'platform', 'unknown')
+                agent_platforms[agent.paw] = platform.lower()
+
+                # Apply OS filter
+                if os_filter and os_filter.lower() != 'all':
+                    if os_filter.lower() not in platform.lower():
+                        continue
+
+                # Apply search filter to agent
+                if search:
+                    agent_host = getattr(agent, 'host', '') or ''
+                    agent_user = getattr(agent, 'username', '') or ''
+                    if search not in agent_host.lower() and search not in agent_user.lower() and search not in agent.paw.lower():
+                        continue
+
+                filtered_agent_paws.add(agent.paw)
 
             # 1. Aggregate "simulated" techniques based on Caldera operations & links
             technique_stats: Dict[str, Dict[str, Any]] = {}
@@ -1561,6 +1613,10 @@ class BASTIONService:
             operations = await self.data_svc.locate('operations')
             for op in operations:
                 if not op.start:
+                    continue
+
+                # Filter by operation_id if specified
+                if operation_id and operation_id != 'all' and op.id != operation_id:
                     continue
 
                 # Unify as naive for comparison (timezone-aware -> naive)
@@ -1579,16 +1635,33 @@ class BASTIONService:
                     continue
 
                 for link in op.chain:
+                    # Apply OS filter - skip if agent doesn't match
+                    link_paw = getattr(link, 'paw', None)
+                    if os_filter and os_filter.lower() != 'all':
+                        agent_platform = agent_platforms.get(link_paw, '')
+                        if os_filter.lower() not in agent_platform:
+                            continue
+
                     ability = getattr(link, 'ability', None)
                     if not ability or not ability.technique_id:
                         continue
 
                     tech_id = ability.technique_id
+                    tech_name = ability.technique_name or tech_id
+                    tactic = ability.tactic or 'unknown'
+
+                    # Apply search filter to technique
+                    if search:
+                        if (search not in tech_id.lower() and
+                            search not in tech_name.lower() and
+                            search not in tactic.lower()):
+                            continue
+
                     if tech_id not in technique_stats:
                         technique_stats[tech_id] = {
                             'id': tech_id,
-                            'name': ability.technique_name or tech_id,
-                            'tactic': ability.tactic or 'unknown',
+                            'name': tech_name,
+                            'tactic': tactic,
                             'simulated': 0,
                             'detected': 0,
                         }
@@ -1664,15 +1737,22 @@ class BASTIONService:
                     self.log.warning(f"[BASTION] Wazuh alerts query failed (proceeding with detection=0): {e}")
 
             # 3. Calculate Detection rate / status
+            # NOTE: Detection rate should be based on whether the technique was detected,
+            # not on the raw count of alerts. Each simulated attack should count as 1,
+            # and if at least 1 alert matched, that counts as 1 detection.
+            # Rate = min(detected_count, simulated_count) / simulated_count * 100
+            # This caps the rate at 100% maximum.
             techniques: List[Dict[str, Any]] = []
             for tech_id, stats in technique_stats.items():
                 simulated = stats["simulated"]
-                detected = stats["detected"]
-                rate = (detected / simulated * 100.0) if simulated > 0 else 0.0
+                detected_raw = stats["detected"]
+                # Cap detected count at simulated count to prevent >100% rates
+                detected_capped = min(detected_raw, simulated) if simulated > 0 else 0
+                rate = (detected_capped / simulated * 100.0) if simulated > 0 else 0.0
 
                 if simulated == 0:
                     status = "not_simulated"  # Gray
-                elif detected == 0:
+                elif detected_raw == 0:
                     status = "gap"            # Red
                 elif rate < 80:
                     status = "partial"        # Yellow
@@ -1684,7 +1764,8 @@ class BASTIONService:
                     "name": stats["name"],
                     "tactic": stats["tactic"],
                     "simulated": simulated,
-                    "detected": detected,
+                    "detected": detected_capped,  # Use capped value for display
+                    "detected_raw": detected_raw,  # Keep raw count for debugging
                     "detection_rate": round(rate, 1),
                     "status": status,
                 })
@@ -1707,22 +1788,21 @@ class BASTIONService:
             for t in tactics.values():
                 total = t["total_simulated"]
                 detected = t["total_detected"]
-                t["coverage"] = round((detected / total * 100.0) if total > 0 else 0.0, 1)
+                # Coverage is already using capped detected values, but ensure max 100%
+                coverage = (detected / total * 100.0) if total > 0 else 0.0
+                t["coverage"] = round(min(coverage, 100.0), 1)
+
+            total_simulated = sum(t["simulated"] for t in techniques)
+            total_detected = sum(t["detected"] for t in techniques)
+            # Ensure overall rate never exceeds 100%
+            overall_rate = (total_detected / total_simulated * 100.0) if total_simulated > 0 else 0.0
+            overall_rate = min(overall_rate, 100.0)
 
             summary = {
                 "total_techniques": len(techniques),
-                "total_simulated": sum(t["simulated"] for t in techniques),
-                "total_detected": sum(t["detected"] for t in techniques),
-                "overall_detection_rate": round(
-                    (
-                        sum(t["detected"] for t in techniques)
-                        / sum(t["simulated"] for t in techniques)
-                        * 100.0
-                    )
-                    if techniques and sum(t["simulated"] for t in techniques) > 0
-                    else 0.0,
-                    1,
-                ),
+                "total_simulated": total_simulated,
+                "total_detected": total_detected,
+                "overall_detection_rate": round(overall_rate, 1),
             }
 
             return web.json_response({

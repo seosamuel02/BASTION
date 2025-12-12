@@ -26,12 +26,25 @@ ChartJS.register(
   Filler
 );
 
-const detectionEvents = ref([]);  // 테이블에서 실제로 쓸 이벤트 배열
+const detectionEvents = ref([]);
+const expandedDetections = ref(new Set());
+
+const toggleDetectionDetail = (idx) => {
+  if (expandedDetections.value.has(idx)) {
+    expandedDetections.value.delete(idx);
+  } else {
+    expandedDetections.value.add(idx);
+  }
+  expandedDetections.value = new Set(expandedDetections.value);
+};
+
+const isDetectionExpanded = (idx) => {
+  return expandedDetections.value.has(idx);
+};
 
 const transformDetectionEvents = (rawEvents) => {
-  console.log("📌 [DEBUG] rawEvents:", rawEvents);
+  console.log("[DEBUG] rawEvents:", rawEvents);
   detectionEvents.value = (rawEvents || []).map(ev => ({
-    // IntegrationEngine._summarize_hit() 기준 매핑
     timestamp: ev['@timestamp'] || ev.timestamp || null,
     agent_name: ev['agent.name'] || ev.agent_name || null,
     agent_id: ev['agent.id'] || ev.agent_id || null,
@@ -41,15 +54,19 @@ const transformDetectionEvents = (rawEvents) => {
     technique_id: ev.technique_id || ev['mitre.id'] || null,
     tactic: ev.tactic || null,
     description: ev.description || ev.message || '',
-
-    // 매칭 상태 / step / source / operation 정보
-    match_status: ev.match_status || 'UNMATCHED',
+    match_status: (ev.match_status || 'UNMATCHED').toLowerCase(),
     attack_step_id: ev.attack_step_id || ev.link_id || null,
     match_source: ev.match_source || ev.source || 'wazuh',
     opId: ev.opId || ev.operation_id || ev.op_id || null,
+    // Raw event data for Splunk-like detail view
+    full_log: ev.full_log || '',
+    raw_data: ev.raw_data || {},
+    syscheck: ev.syscheck || {},
+    location: ev.location || '',
+    predecoder: ev.predecoder || {},
+    decoder: ev.decoder || {},
   }));
-
-  console.log("📌 [DEBUG] mappedEvents:", detectionEvents.value);
+  console.log("[DEBUG] mappedEvents:", detectionEvents.value);
 };
 
 const $api = inject("$api");
@@ -58,7 +75,6 @@ const isLoading = ref(false);
 const showSubText = ref(false);
 const selectedAgentHost = ref(null);
 
-// Dashboard Summary Data
 const dashboardData = reactive({
   kpi: {
     total_operations: 0,
@@ -73,7 +89,6 @@ const dashboardData = reactive({
   query_time: null
 });
 
-// Filter State
 const filters = reactive({
   hours: 72,
   min_level: 5,
@@ -83,10 +98,8 @@ const filters = reactive({
   search: ''
 });
 
-// All Operations (unfiltered) for dropdown
 const allOperations = ref([]);
 
-// Agents Data
 const agentQueryHours = ref(24);
 const agentsData = reactive({
   total_agents: 0,
@@ -94,12 +107,10 @@ const agentsData = reactive({
   query_time: null
 });
 
-// Correlation
 const correlationOperationId = ref('');
 const correlationResult = ref(null);
 const isCorrelating = ref(false);
 
-// Week 11: MITRE Heat Map Data
 const heatMapData = reactive({
   techniques: [],
   tactics: [],
@@ -111,7 +122,6 @@ const heatMapData = reactive({
   }
 });
 
-// Watch filters and reload data when changed
 watch(() => filters.operation_id, async (newValue, oldValue) => {
   if (newValue !== oldValue) {
     await fetchDashboardSummary();
@@ -124,6 +134,7 @@ watch(() => filters.os_filter, async (newValue, oldValue) => {
   if (newValue !== oldValue) {
     await fetchDashboardSummary();
     await fetchAgents();
+    await fetchHeatMapData();
   }
 });
 
@@ -131,6 +142,7 @@ watch(() => filters.search, async (newValue, oldValue) => {
   if (newValue !== oldValue) {
     await fetchDashboardSummary();
     await fetchAgents();
+    await fetchHeatMapData();
   }
 });
 
@@ -157,25 +169,18 @@ onUnmounted(() => {
 const fetchDashboardSummary = async () => {
   try {
     let url = `/plugin/bastion/dashboard?hours=${filters.hours}&min_level=${filters.min_level}`;
-
     if (filters.operation_id && filters.operation_id !== 'all') {
       url += `&operation_id=${filters.operation_id}`;
     }
-
     if (filters.os_filter && filters.os_filter !== 'all') {
       url += `&os_filter=${filters.os_filter}`;
     }
-
     if (filters.search) {
       url += `&search=${encodeURIComponent(filters.search)}`;
     }
-
     const response = await $api.get(url);
     Object.assign(dashboardData, response.data);
-
     transformDetectionEvents(response.data.detection_events || []);
-
-    // Store all operations for dropdown (only when no operation filter applied)
     if (filters.operation_id === 'all' && response.data.operations) {
       allOperations.value = response.data.operations;
     }
@@ -187,19 +192,15 @@ const fetchDashboardSummary = async () => {
 const fetchAgents = async () => {
   try {
     let url = `/plugin/bastion/agents?hours=${agentQueryHours.value}`;
-
     if (filters.operation_id && filters.operation_id !== 'all') {
       url += `&operation_id=${filters.operation_id}`;
     }
-
     if (filters.os_filter && filters.os_filter !== 'all') {
       url += `&os_filter=${filters.os_filter}`;
     }
-
     if (filters.search) {
       url += `&search=${encodeURIComponent(filters.search)}`;
     }
-
     const response = await $api.get(url);
     Object.assign(agentsData, response.data);
   } catch (error) {
@@ -207,10 +208,19 @@ const fetchAgents = async () => {
   }
 };
 
-// Week 11: Fetch MITRE Heat Map Data
 const fetchHeatMapData = async () => {
   try {
-    const response = await $api.get(`/plugin/bastion/dashboard/techniques?hours=${filters.hours}`);
+    let url = `/plugin/bastion/dashboard/techniques?hours=${filters.hours}`;
+    if (filters.operation_id && filters.operation_id !== 'all') {
+      url += `&operation_id=${filters.operation_id}`;
+    }
+    if (filters.os_filter && filters.os_filter !== 'all') {
+      url += `&os_filter=${filters.os_filter}`;
+    }
+    if (filters.search) {
+      url += `&search=${encodeURIComponent(filters.search)}`;
+    }
+    const response = await $api.get(url);
     Object.assign(heatMapData, response.data);
   } catch (error) {
     console.error('Failed to fetch heat map data:', error);
@@ -221,9 +231,9 @@ const refreshData = async () => {
   isLoading.value = true;
   try {
     await Promise.all([fetchAgents(), fetchDashboardSummary()]);
-    window.toast('데이터를 성공적으로 새로고침했습니다', true);
+    window.toast('Data refreshed successfully', true);
   } catch (error) {
-    window.toast('데이터 새로고침 실패', false);
+    window.toast('Failed to refresh data', false);
   } finally {
     isLoading.value = false;
   }
@@ -231,16 +241,15 @@ const refreshData = async () => {
 
 const correlateOperation = async () => {
   if (!correlationOperationId.value) return;
-
   isCorrelating.value = true;
   try {
     const response = await $api.post('/plugin/bastion/correlate', {
       operation_id: correlationOperationId.value
     });
     correlationResult.value = response.data;
-    window.toast('상관관계 분석 완료', true);
+    window.toast('Correlation analysis complete', true);
   } catch (error) {
-    window.toast('상관관계 분석 실패', false);
+    window.toast('Correlation analysis failed', false);
     console.error('Correlation failed:', error);
   } finally {
     isCorrelating.value = false;
@@ -259,25 +268,19 @@ const clearAgentFilter = () => {
   selectedAgentHost.value = null;
 };
 
-// Computed Properties
 const filteredDetections = computed(() => {
   let detections = detectionEvents.value;
-
   if (selectedAgentHost.value) {
     detections = detections.filter(d => d.agent_name === selectedAgentHost.value);
   }
-
-  // Apply OS filter (detection의 agent_os 직접 사용)
   if (filters.os_filter !== 'all') {
     detections = detections.filter(d => {
       if (!d.agent_os) return false;
-
       const platform = d.agent_os.toLowerCase();
       const filter = filters.os_filter.toLowerCase();
       return platform === filter || platform.includes(filter);
     });
   }
-
   if (filters.search) {
     const search = filters.search.toLowerCase();
     detections = detections.filter(d =>
@@ -286,14 +289,11 @@ const filteredDetections = computed(() => {
       d.technique_id?.toLowerCase().includes(search)
     );
   }
-
   return detections;
 });
 
 const sortedAgents = computed(() => {
   let agents = [...agentsData.agents];
-
-  // Apply OS filter
   if (filters.os_filter !== 'all') {
     agents = agents.filter(agent => {
       const platform = agent.platform.toLowerCase();
@@ -301,8 +301,6 @@ const sortedAgents = computed(() => {
       return platform === filter || platform.includes(filter);
     });
   }
-
-  // Sort by alive status and host name
   return agents.sort((a, b) => {
     if (a.alive !== b.alive) {
       return b.alive ? 1 : -1;
@@ -318,103 +316,162 @@ const filteredOperations = computed(() => {
   return dashboardData.operations.filter(op => op.id === filters.operation_id);
 });
 
-// Week 11: Security Score Color (Cymulate-style)
 const securityScoreColor = computed(() => {
   const score = filteredKPI.value.security_score || 0;
-  if (score >= 90) return 'has-text-success';  // Green
-  if (score >= 80) return 'has-text-success-light';  // Light Green
-  if (score >= 70) return 'has-text-warning';  // Yellow
-  if (score >= 60) return 'has-text-warning-dark';  // Orange
-  return 'has-text-danger';  // Red
+  if (score >= 90) return 'cyber-green';
+  if (score >= 80) return 'cyber-green';
+  if (score >= 70) return 'cyber-yellow';
+  if (score >= 60) return 'cyber-orange';
+  return 'cyber-red';
 });
 
-const securityScoreProgressClass = computed(() => {
-  const score = filteredKPI.value.security_score || 0;
-  if (score >= 90) return 'is-success';
-  if (score >= 80) return 'is-success';
-  if (score >= 70) return 'is-warning';
-  if (score >= 60) return 'is-warning';
-  return 'is-danger';
-});
-
-// Week 11: Heat Map Summary Color (Detection Rate based)
 const heatMapSummaryColor = computed(() => {
-  const rate = heatMapData.summary.overall_detection_rate || 0;
-  if (rate >= 80) return '#48c774';       // Green
-  if (rate >= 60) return '#ffdd57';       // Yellow
-  if (rate > 0) return '#ff9800';         // Orange
-  return '#ff3860';                        // Red
+  const rate = Math.min(heatMapData.summary.overall_detection_rate || 0, 100);
+  if (rate >= 80) return '#00ff88';
+  if (rate >= 60) return '#ffcc00';
+  if (rate > 0) return '#ff9500';
+  return '#ff3366';
 });
 
-const heatMapSummaryColorClass = computed(() => {
-  const rate = heatMapData.summary.overall_detection_rate || 0;
-  if (rate >= 80) return 'has-text-success';
-  if (rate >= 60) return 'has-text-warning';
-  if (rate > 0) return 'has-text-warning-dark';
-  return 'has-text-danger';
-});
-
-// Utility Functions
 const formatTimestamp = (timestamp) => {
   if (!timestamp) return 'N/A';
   const date = new Date(timestamp);
-  return date.toLocaleString('ko-KR');
+  return date.toLocaleString('en-US', {
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
 };
 
 const getLevelClass = (level) => {
-  if (level >= 12) return 'danger';
-  if (level >= 10) return 'warning';
-  if (level >= 7) return 'info';
-  return 'light';
+  if (level >= 12) return 'critical';
+  if (level >= 10) return 'high';
+  if (level >= 7) return 'medium';
+  return 'low';
 };
 
 const formatCoverage = (coverage) => {
   return `${(coverage * 100).toFixed(1)}%`;
 };
 
-const getBarWidth = (value, max) => {
-  if (!max) return 0;
-  return Math.round((value / max) * 100);
+// Flatten nested object for Splunk-like display
+const flattenEventData = (obj, prefix = '') => {
+  const result = {};
+  if (!obj || typeof obj !== 'object') return result;
+
+  for (const [key, value] of Object.entries(obj)) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+
+    // Skip mitre field (already displayed separately)
+    if (key === 'mitre') continue;
+
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      // Recursively flatten nested objects
+      Object.assign(result, flattenEventData(value, fullKey));
+    } else {
+      result[fullKey] = value;
+    }
+  }
+  return result;
 };
 
-const maxExecuted = computed(() => {
-  return Math.max(...dashboardData.tactic_coverage.map(t => t.executed), 1);
-});
+// Format event value for display
+const formatEventValue = (value) => {
+  if (value === null || value === undefined) return 'N/A';
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(', ') : '[]';
+  }
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+  return String(value);
+};
 
-const maxTimelineValue = computed(() => {
-  if (!dashboardData.timeline || dashboardData.timeline.length === 0) return 100;
-  return Math.max(
-    ...dashboardData.timeline.map(d => Math.max(d.attacks, d.detections)),
-    10
-  );
-});
-
-// Filtered KPI values based on current filters
 const filteredKPI = computed(() => {
   const filtered_agents = sortedAgents.value;
   const filtered_detections = filteredDetections.value;
   const filtered_operations = filteredOperations.value;
 
   // Calculate total attack steps from filtered operations
-  const total_attack_steps = filtered_operations.reduce((sum, op) => {
-    return sum + (op.attack_steps ? op.attack_steps.length : 0);
-  }, 0);
+  let total_attack_steps = 0;
+  const uniqueTechniques = new Set();
+  const detectedTechniques = new Set();
+  const uniqueTactics = new Set();
 
-  // Calculate coverage (detections / attack steps)
+  for (const op of filtered_operations) {
+    for (const step of (op.attack_steps || [])) {
+      // Apply OS filter to attack steps
+      if (filters.os_filter !== 'all') {
+        const agentPlatform = op.agent_platforms?.[step.paw];
+        if (!agentPlatform) continue;
+        const platform = agentPlatform.toLowerCase();
+        const filterOs = filters.os_filter.toLowerCase();
+        if (platform !== filterOs && !platform.includes(filterOs)) {
+          continue;
+        }
+      }
+      total_attack_steps += 1;
+      if (step.technique_id) {
+        uniqueTechniques.add(step.technique_id);
+      }
+      if (step.tactic) {
+        uniqueTactics.add(step.tactic);
+      }
+    }
+  }
+
+  // Calculate detected techniques from filtered detections
+  for (const detection of filtered_detections) {
+    if (detection.technique_id) {
+      detectedTechniques.add(detection.technique_id);
+    }
+  }
+
+  // Calculate detection rate based on filtered data
+  const detection_rate = total_attack_steps > 0
+    ? Math.min(100, Math.round((filtered_detections.length / total_attack_steps) * 100))
+    : 0;
+
+  // Calculate security score from detection rate
+  const security_score = detection_rate;
+
+  // Calculate security grade from score
+  let security_grade = 'N/A';
+  if (total_attack_steps > 0) {
+    if (security_score >= 90) security_grade = 'A';
+    else if (security_score >= 80) security_grade = 'B';
+    else if (security_score >= 70) security_grade = 'C';
+    else if (security_score >= 60) security_grade = 'D';
+    else security_grade = 'F';
+  }
+
+  // Calculate critical gaps (techniques simulated but not detected)
+  const critical_gaps = uniqueTechniques.size - detectedTechniques.size;
+
+  // Calculate tactic coverage
+  const tactic_coverage = uniqueTactics.size;
+
+  // Calculate MTTD from matched detections
+  let mttd_minutes = 0;
+  const matchedDetections = filtered_detections.filter(d => d.match_status === 'matched');
+  if (matchedDetections.length > 0) {
+    // Use backend MTTD if available, otherwise show 0
+    const kpi = dashboardData.kpi || {};
+    mttd_minutes = kpi.mttd_minutes || 0;
+  }
+
   const coverage = total_attack_steps > 0
     ? filtered_detections.length / total_attack_steps
     : 0;
 
-  // Get last seen from filtered agents
   const last_seen = filtered_agents.length > 0
     ? filtered_agents.reduce((latest, agent) => {
       const agentTime = new Date(agent.last_seen);
       return agentTime > latest ? agentTime : latest;
     }, new Date(0)).toISOString()
     : null;
-
-  // Week 11: Security metrics from backend API
-  const kpi = dashboardData.kpi || {};
 
   return {
     total_operations: filtered_operations.length,
@@ -423,36 +480,28 @@ const filteredKPI = computed(() => {
     total_detections: filtered_detections.length,
     coverage: coverage,
     last_seen: last_seen,
-    // Week 11: BAS-style metrics from backend
-    security_score: kpi.security_score || 0,
-    security_grade: kpi.security_grade || 'N/A',
-    detection_rate: kpi.detection_rate || 0,
-    mttd_minutes: kpi.mttd_minutes || 0,
-    critical_gaps: kpi.critical_gaps || 0,
-    tactic_coverage: kpi.tactic_coverage || 0
+    security_score: security_score,
+    security_grade: security_grade,
+    detection_rate: detection_rate,
+    mttd_minutes: mttd_minutes,
+    critical_gaps: Math.max(0, critical_gaps),
+    tactic_coverage: tactic_coverage
   };
 });
 
-// Chart Data for Tactic Coverage (Bar Chart) - Color-coded by Detection Rate
 const tacticChartData = computed(() => {
-  // OS filter를 적용한 tactic 통계 재계산
   const tacticStats = {};
-
-  // 1. Executed 통계 (filteredOperations의 attack_steps)
   for (const op of filteredOperations.value) {
     for (const step of (op.attack_steps || [])) {
-      // OS filter 확인
       if (filters.os_filter !== 'all') {
         const agentPlatform = op.agent_platforms?.[step.paw];
         if (!agentPlatform) continue;
-
         const platform = agentPlatform.toLowerCase();
         const filterOs = filters.os_filter.toLowerCase();
         if (platform !== filterOs && !platform.includes(filterOs)) {
-          continue; // OS가 맞지 않으면 스킵
+          continue;
         }
       }
-
       const tactic = step.tactic;
       if (tactic) {
         if (!tacticStats[tactic]) {
@@ -462,8 +511,6 @@ const tacticChartData = computed(() => {
       }
     }
   }
-
-  // 2. Detected 통계 (filteredDetections)
   for (const detection of filteredDetections.value) {
     const tactic = detection.tactic;
     if (tactic) {
@@ -473,56 +520,53 @@ const tacticChartData = computed(() => {
       tacticStats[tactic].detected += 1;
     }
   }
-
-  // 3. Chart 데이터 생성 with BAS-style color coding
+  // Cap detected count at executed count per tactic to prevent chart distortion
+  for (const tactic of Object.keys(tacticStats)) {
+    if (tacticStats[tactic].detected > tacticStats[tactic].executed) {
+      tacticStats[tactic].detected = tacticStats[tactic].executed;
+    }
+  }
   const tactics = Object.keys(tacticStats).sort();
   if (tactics.length === 0) {
     return { labels: [], datasets: [] };
   }
-
-  // Calculate detection rates and assign colors (AttackIQ/Cymulate style)
   const detectedColors = tactics.map(tactic => {
     const stats = tacticStats[tactic];
     const detectionRate = stats.executed > 0 ? (stats.detected / stats.executed) * 100 : 0;
-
-    // Color coding: Red (GAP), Yellow (PARTIAL), Green (OK)
     if (detectionRate === 0) {
-      return 'rgba(255, 56, 96, 0.8)';  // Red - Critical Gap
+      return 'rgba(255, 51, 102, 0.8)';
     } else if (detectionRate < 80) {
-      return 'rgba(255, 221, 87, 0.8)';  // Yellow - Partial Detection
+      return 'rgba(255, 204, 0, 0.8)';
     } else {
-      return 'rgba(72, 199, 116, 0.8)';  // Green - Good Coverage
+      return 'rgba(0, 255, 136, 0.8)';
     }
   });
-
   const detectedBorderColors = tactics.map(tactic => {
     const stats = tacticStats[tactic];
     const detectionRate = stats.executed > 0 ? (stats.detected / stats.executed) * 100 : 0;
-
     if (detectionRate === 0) {
-      return '#ff3860';  // Red border
+      return '#ff3366';
     } else if (detectionRate < 80) {
-      return '#ffdd57';  // Yellow border
+      return '#ffcc00';
     } else {
-      return '#48c774';  // Green border
+      return '#00ff88';
     }
   });
-
   return {
     labels: tactics,
     datasets: [
       {
-        label: 'Executed',
-        backgroundColor: 'rgba(50, 115, 220, 0.6)',  // Blue for executed steps
-        borderColor: '#3273dc',
-        borderWidth: 1,
+        label: 'EXECUTED',
+        backgroundColor: 'rgba(0, 212, 255, 0.6)',
+        borderColor: '#00d4ff',
+        borderWidth: 2,
         data: tactics.map(t => tacticStats[t].executed)
       },
       {
-        label: 'Detected',
-        backgroundColor: detectedColors,  // Dynamic colors based on detection rate
+        label: 'DETECTED',
+        backgroundColor: detectedColors,
         borderColor: detectedBorderColors,
-        borderWidth: 1,
+        borderWidth: 2,
         data: tactics.map(t => tacticStats[t].detected)
       }
     ]
@@ -537,63 +581,65 @@ const tacticChartOptions = {
       display: true,
       position: 'top',
       labels: {
-        color: '#f5f5f5',
-        font: { size: 11 }
+        color: '#00ff88',
+        font: { family: "'JetBrains Mono', monospace", size: 10, weight: 'bold' },
+        boxWidth: 12,
+        padding: 15
       }
     },
     tooltip: {
-      backgroundColor: 'rgba(0, 0, 0, 0.8)',
-      titleColor: '#f5f5f5',
-      bodyColor: '#f5f5f5',
-      borderColor: '#363636',
-      borderWidth: 1
+      backgroundColor: 'rgba(10, 14, 18, 0.95)',
+      titleColor: '#00ff88',
+      bodyColor: '#e0e6ed',
+      borderColor: '#00ff88',
+      borderWidth: 1,
+      titleFont: { family: "'JetBrains Mono', monospace", weight: 'bold' },
+      bodyFont: { family: "'IBM Plex Sans', sans-serif" },
+      padding: 12,
+      cornerRadius: 0
     }
   },
   scales: {
     x: {
       ticks: {
-        color: '#b5b5b5',
-        font: { size: 10 },
+        color: '#5a6a7a',
+        font: { family: "'JetBrains Mono', monospace", size: 9 },
         maxRotation: 45,
         minRotation: 0
       },
       grid: {
-        color: 'rgba(255, 255, 255, 0.05)'
+        color: 'rgba(0, 255, 136, 0.05)',
+        lineWidth: 1
       }
     },
     y: {
       beginAtZero: true,
       ticks: {
-        color: '#b5b5b5',
-        font: { size: 10 },
+        color: '#5a6a7a',
+        font: { family: "'JetBrains Mono', monospace", size: 10 },
         precision: 0
       },
       grid: {
-        color: 'rgba(255, 255, 255, 0.05)'
+        color: 'rgba(0, 255, 136, 0.08)',
+        lineWidth: 1
       }
     }
   }
 };
 
-// Filtered Timeline based on selected operation and OS filter
 const filteredTimeline = computed(() => {
   const timelineMap = {};
-
-  // 1. Attack steps 집계 (Operation filter + OS filter)
   for (const op of filteredOperations.value) {
     for (const step of (op.attack_steps || [])) {
-      // OS filter 확인
       if (filters.os_filter !== 'all') {
         const agentPlatform = op.agent_platforms?.[step.paw];
         if (!agentPlatform) continue;
-
         const platform = agentPlatform.toLowerCase();
         const filterOs = filters.os_filter.toLowerCase();
         if (platform !== filterOs && !platform.includes(filterOs)) {
-          continue; // OS가 맞지 않으면 스킵
+          continue;
         }
       }
-
       if (step.timestamp) {
         const bucket = step.timestamp.substring(0, 16);
         if (!timelineMap[bucket]) {
@@ -603,8 +649,6 @@ const filteredTimeline = computed(() => {
       }
     }
   }
-
-  // 2. Detections 집계 (이미 filteredDetections에서 OS filter 적용됨)
   filteredDetections.value.forEach(detection => {
     if (detection.timestamp) {
       const bucket = detection.timestamp.substring(0, 16);
@@ -614,44 +658,43 @@ const filteredTimeline = computed(() => {
       timelineMap[bucket].detections += 1;
     }
   });
-
   return Object.values(timelineMap).sort((a, b) => a.time.localeCompare(b.time));
 });
 
-// Chart Data for Timeline (Line Chart)
 const timelineChartData = computed(() => {
   const timeline = filteredTimeline.value;
-
   if (!timeline || timeline.length === 0) {
-    return {
-      labels: [],
-      datasets: []
-    };
+    return { labels: [], datasets: [] };
   }
-
   return {
     labels: timeline.map((d, i) => `T${i}`),
     datasets: [
       {
-        label: 'Attacks',
-        backgroundColor: 'rgba(241, 70, 104, 0.2)',
-        borderColor: '#f14668',
+        label: 'ATTACKS',
+        backgroundColor: 'rgba(255, 51, 102, 0.15)',
+        borderColor: '#ff3366',
         borderWidth: 2,
         fill: true,
-        tension: 0.4,
-        pointRadius: 3,
-        pointHoverRadius: 5,
+        tension: 0.3,
+        pointRadius: 4,
+        pointBackgroundColor: '#ff3366',
+        pointBorderColor: '#0a0e12',
+        pointBorderWidth: 2,
+        pointHoverRadius: 6,
         data: timeline.map(d => d.attacks)
       },
       {
-        label: 'Detections',
-        backgroundColor: 'rgba(72, 199, 116, 0.2)',
-        borderColor: '#48c774',
+        label: 'DETECTIONS',
+        backgroundColor: 'rgba(0, 255, 136, 0.15)',
+        borderColor: '#00ff88',
         borderWidth: 2,
         fill: true,
-        tension: 0.4,
-        pointRadius: 3,
-        pointHoverRadius: 5,
+        tension: 0.3,
+        pointRadius: 4,
+        pointBackgroundColor: '#00ff88',
+        pointBorderColor: '#0a0e12',
+        pointBorderWidth: 2,
+        pointHoverRadius: 6,
         data: timeline.map(d => d.detections)
       }
     ]
@@ -666,37 +709,43 @@ const timelineChartOptions = {
       display: true,
       position: 'top',
       labels: {
-        color: '#f5f5f5',
-        font: { size: 11 }
+        color: '#00ff88',
+        font: { family: "'JetBrains Mono', monospace", size: 10, weight: 'bold' },
+        boxWidth: 12,
+        padding: 15
       }
     },
     tooltip: {
-      backgroundColor: 'rgba(0, 0, 0, 0.8)',
-      titleColor: '#f5f5f5',
-      bodyColor: '#f5f5f5',
-      borderColor: '#363636',
-      borderWidth: 1
+      backgroundColor: 'rgba(10, 14, 18, 0.95)',
+      titleColor: '#00ff88',
+      bodyColor: '#e0e6ed',
+      borderColor: '#00ff88',
+      borderWidth: 1,
+      titleFont: { family: "'JetBrains Mono', monospace", weight: 'bold' },
+      bodyFont: { family: "'IBM Plex Sans', sans-serif" },
+      padding: 12,
+      cornerRadius: 0
     }
   },
   scales: {
     x: {
       ticks: {
-        color: '#b5b5b5',
-        font: { size: 10 }
+        color: '#5a6a7a',
+        font: { family: "'JetBrains Mono', monospace", size: 10 }
       },
       grid: {
-        color: 'rgba(255, 255, 255, 0.05)'
+        color: 'rgba(0, 255, 136, 0.05)'
       }
     },
     y: {
       beginAtZero: true,
       ticks: {
-        color: '#b5b5b5',
-        font: { size: 10 },
+        color: '#5a6a7a',
+        font: { family: "'JetBrains Mono', monospace", size: 10 },
         precision: 0
       },
       grid: {
-        color: 'rgba(255, 255, 255, 0.05)'
+        color: 'rgba(0, 255, 136, 0.08)'
       }
     }
   }
@@ -704,832 +753,2248 @@ const timelineChartOptions = {
 </script>
 
 <template>
-  <div id="bastionPage">
-    <!-- Header -->
-    <div class="mb-5">
-      <h1 class="title is-1">
-        Bastion
-      </h1>
-      <p class="subtitle is-6 has-text-grey-light">공격 시뮬레이션과 탐지 이벤트를 연계하여 커버리지와 리스크를 한눈에.</p>
-    </div>
-    <hr>
+  <div>
+    <!-- Standard Caldera Plugin Header -->
+    <h1 class="caldera-plugin-title">Bastion</h1>
+    <p class="caldera-plugin-description">Breach and Attack Simulation integrated with Wazuh SIEM for automated detection validation.</p>
+    <hr class="caldera-plugin-divider" />
 
-    <!-- Global Filters Section -->
-    <div class="section">
-      <div class="is-flex is-justify-content-space-between is-align-items-center mb-4">
-        <h3 class="title is-5">필터</h3>
-        <button class="button is-primary is-small" @click="refreshData" :disabled="isLoading">
-          <span class="icon is-small">
-            <i :class="isLoading ? 'fas fa-spinner fa-pulse' : 'fas fa-sync-alt'"></i>
-          </span>
-          <span>{{ isLoading ? '로딩 중...' : '새로고침' }}</span>
+    <div class="bastion-cyber-dashboard">
+      <!-- Scanline Overlay -->
+      <div class="scanline-overlay"></div>
+
+      <!-- Grid Background -->
+      <div class="grid-background"></div>
+
+      <!-- Header Section -->
+      <header class="dashboard-header">
+      <div class="header-content">
+        <div class="logo-section">
+          <div class="logo-icon">
+            <svg viewBox="0 0 100 100" class="shield-icon">
+              <polygon points="50,5 95,25 95,55 50,95 5,55 5,25" fill="none" stroke="currentColor" stroke-width="3"/>
+              <polygon points="50,20 80,35 80,55 50,80 20,55 20,35" fill="currentColor" opacity="0.3"/>
+              <circle cx="50" cy="50" r="12" fill="none" stroke="currentColor" stroke-width="2"/>
+              <circle cx="50" cy="50" r="4" fill="currentColor"/>
+            </svg>
+          </div>
+          <div class="logo-text">
+            <h1 class="main-title">BASTION</h1>
+            <p class="subtitle-text">BREACH & ATTACK SIMULATION COMMAND CENTER</p>
+          </div>
+        </div>
+        <div class="header-status">
+          <div class="status-indicator online">
+            <span class="pulse-ring"></span>
+            <span class="status-dot"></span>
+            <span class="status-text">SYSTEM ONLINE</span>
+          </div>
+          <div class="timestamp">{{ new Date().toLocaleString('en-US') }}</div>
+        </div>
+      </div>
+      <div class="header-divider"></div>
+    </header>
+
+    <!-- Filters Section -->
+    <section class="filters-section">
+      <div class="section-header">
+        <span class="section-icon">[&gt;_]</span>
+        <h2 class="section-title">COMMAND FILTERS</h2>
+        <button class="refresh-btn" @click="refreshData" :disabled="isLoading">
+          <span class="btn-icon" :class="{ 'spinning': isLoading }">&#x21BB;</span>
+          <span class="btn-text">{{ isLoading ? 'SYNCING...' : 'REFRESH' }}</span>
         </button>
       </div>
-
-      <div class="box has-background-dark">
-        <div class="columns is-multiline">
-          <div class="column is-6-mobile is-3-tablet">
-            <div class="field">
-              <label class="label has-text-grey-light">검색</label>
-              <div class="control has-icons-left">
-                <input class="input" type="text" v-model="filters.search" placeholder="Agent, Description, Technique...">
-                <span class="icon is-small is-left">
-                  <i class="fas fa-search"></i>
-                </span>
-              </div>
-            </div>
+      <div class="filters-grid">
+        <div class="filter-item">
+          <label class="filter-label">SEARCH_QUERY</label>
+          <div class="input-wrapper">
+            <span class="input-prefix">&gt;</span>
+            <input type="text" v-model="filters.search" placeholder="agent://technique://description" class="cyber-input">
           </div>
-
-          <div class="column is-6-mobile is-3-tablet">
-            <div class="field">
-              <label class="label has-text-grey-light">Operation</label>
-              <div class="control">
-                <div class="select is-fullwidth">
-                  <select v-model="filters.operation_id">
-                    <option value="all">All Operations</option>
-                    <option v-for="op in allOperations" :key="op.id" :value="op.id">
-                      {{ op.name }}
-                    </option>
-                  </select>
-                </div>
-              </div>
-            </div>
+        </div>
+        <div class="filter-item">
+          <label class="filter-label">OPERATION_ID</label>
+          <div class="select-wrapper">
+            <select v-model="filters.operation_id" class="cyber-select">
+              <option value="all">[ ALL_OPERATIONS ]</option>
+              <option v-for="op in allOperations" :key="op.id" :value="op.id">
+                {{ op.name }}
+              </option>
+            </select>
           </div>
-
-          <div class="column is-6-mobile is-3-tablet">
-            <div class="field">
-              <label class="label has-text-grey-light">OS Filter</label>
-              <div class="control">
-                <div class="select is-fullwidth">
-                  <select v-model="filters.os_filter">
-                    <option value="all">Any OS</option>
-                    <option value="Windows">Windows</option>
-                    <option value="Linux">Linux</option>
-                    <option value="macOS">macOS</option>
-                  </select>
-                </div>
-              </div>
-            </div>
+        </div>
+        <div class="filter-item">
+          <label class="filter-label">TARGET_OS</label>
+          <div class="select-wrapper">
+            <select v-model="filters.os_filter" class="cyber-select">
+              <option value="all">[ ANY_PLATFORM ]</option>
+              <option value="Windows">WINDOWS</option>
+              <option value="Linux">LINUX</option>
+              <option value="macOS">DARWIN</option>
+            </select>
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- KPI Cards Section -->
-    <div class="section">
-      <div class="columns is-multiline">
-        <!-- Security Score Card (Feature) -->
-        <div class="column is-12-mobile is-4-tablet is-3-desktop">
-          <div class="box has-background-dark kpi-card" style="border-left: 4px solid" :style="{ borderColor: securityScoreColor }">
-            <div class="has-text-centered">
-              <p class="heading mb-2">
-                <span class="icon">
-                  <i class="fas fa-shield-alt"></i>
-                </span>
-                Security Posture Score
-              </p>
-              <p class="title is-1 has-text-weight-bold mb-2" :class="securityScoreColor">
-                {{ filteredKPI.security_score || 0 }}
-              </p>
-              <p class="subtitle is-4 has-text-weight-bold" :class="securityScoreColor">
-                Grade: {{ filteredKPI.security_grade || 'N/A' }}
-              </p>
-              <progress class="progress" :class="securityScoreProgressClass" :value="filteredKPI.security_score || 0" max="100"></progress>
+    <!-- KPI Matrix -->
+    <section class="kpi-section">
+      <div class="section-header">
+        <span class="section-icon">[#]</span>
+        <h2 class="section-title">SECURITY POSTURE MATRIX</h2>
+      </div>
+      <div class="kpi-grid">
+        <!-- Security Score - Featured -->
+        <div class="kpi-card featured" :class="securityScoreColor">
+          <div class="kpi-glow"></div>
+          <div class="kpi-content">
+            <div class="kpi-header">
+              <span class="kpi-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+                </svg>
+              </span>
+              <span class="kpi-label">SECURITY_SCORE</span>
+            </div>
+            <div class="kpi-value-wrapper">
+              <span class="kpi-value large">{{ filteredKPI.security_score || 0 }}</span>
+              <span class="kpi-unit">/100</span>
+            </div>
+            <div class="kpi-grade">
+              <span class="grade-label">GRADE:</span>
+              <span class="grade-value">{{ filteredKPI.security_grade || 'N/A' }}</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill" :style="{ width: (filteredKPI.security_score || 0) + '%' }"></div>
+              <div class="progress-glow"></div>
             </div>
           </div>
         </div>
 
         <!-- Detection Rate -->
-        <div class="column is-half-mobile is-one-third-tablet is-2-desktop">
-          <div class="box has-background-dark kpi-card">
-            <div class="has-text-centered">
-              <div class="kpi-icon-wrapper mb-3">
-                <span class="icon is-large has-text-success">
-                  <i class="fas fa-check-circle fa-3x"></i>
-                </span>
-              </div>
-              <p class="heading">Detection Rate</p>
-              <p class="title is-3 has-text-weight-bold">{{ filteredKPI.detection_rate || 0 }}%</p>
+        <div class="kpi-card cyber-green">
+          <div class="kpi-content">
+            <div class="kpi-header">
+              <span class="kpi-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                </svg>
+              </span>
+              <span class="kpi-label">DETECTION_RATE</span>
+            </div>
+            <div class="kpi-value-wrapper">
+              <span class="kpi-value">{{ filteredKPI.detection_rate || 0 }}</span>
+              <span class="kpi-unit">%</span>
             </div>
           </div>
         </div>
 
         <!-- MTTD -->
-        <div class="column is-half-mobile is-one-third-tablet is-2-desktop">
-          <div class="box has-background-dark kpi-card">
-            <div class="has-text-centered">
-              <div class="kpi-icon-wrapper mb-3">
-                <span class="icon is-large has-text-warning">
-                  <i class="fas fa-stopwatch fa-3x"></i>
-                </span>
-              </div>
-              <p class="heading">MTTD</p>
-              <p class="title is-3 has-text-weight-bold">{{ filteredKPI.mttd_minutes || 0 }}m</p>
+        <div class="kpi-card cyber-blue">
+          <div class="kpi-content">
+            <div class="kpi-header">
+              <span class="kpi-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/>
+                </svg>
+              </span>
+              <span class="kpi-label">MTTD</span>
+            </div>
+            <div class="kpi-value-wrapper">
+              <span class="kpi-value">{{ filteredKPI.mttd_minutes || 0 }}</span>
+              <span class="kpi-unit">min</span>
             </div>
           </div>
         </div>
 
         <!-- Critical Gaps -->
-        <div class="column is-half-mobile is-one-third-tablet is-2-desktop">
-          <div class="box has-background-dark kpi-card">
-            <div class="has-text-centered">
-              <div class="kpi-icon-wrapper mb-3">
-                <span class="icon is-large has-text-danger">
-                  <i class="fas fa-exclamation-triangle fa-3x"></i>
-                </span>
-              </div>
-              <p class="heading">Critical Gaps</p>
-              <p class="title is-3 has-text-weight-bold">{{ filteredKPI.critical_gaps || 0 }}</p>
+        <div class="kpi-card cyber-red">
+          <div class="kpi-content">
+            <div class="kpi-header">
+              <span class="kpi-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/>
+                </svg>
+              </span>
+              <span class="kpi-label">CRITICAL_GAPS</span>
+            </div>
+            <div class="kpi-value-wrapper">
+              <span class="kpi-value">{{ filteredKPI.critical_gaps || 0 }}</span>
             </div>
           </div>
         </div>
 
         <!-- Tactic Coverage -->
-        <div class="column is-half-mobile is-one-third-tablet is-2-desktop">
-          <div class="box has-background-dark kpi-card">
-            <div class="has-text-centered">
-              <div class="kpi-icon-wrapper mb-3">
-                <span class="icon is-large has-text-info">
-                  <i class="fas fa-layer-group fa-3x"></i>
-                </span>
-              </div>
-              <p class="heading">Tactic Coverage</p>
-              <p class="title is-3 has-text-weight-bold">{{ filteredKPI.tactic_coverage || 0 }}/14</p>
+        <div class="kpi-card cyber-purple">
+          <div class="kpi-content">
+            <div class="kpi-header">
+              <span class="kpi-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                </svg>
+              </span>
+              <span class="kpi-label">TACTIC_COVERAGE</span>
+            </div>
+            <div class="kpi-value-wrapper">
+              <span class="kpi-value">{{ filteredKPI.tactic_coverage || 0 }}</span>
+              <span class="kpi-unit">/14</span>
             </div>
           </div>
         </div>
 
         <!-- Operations -->
-        <div class="column is-half-mobile is-one-third-tablet is-2-desktop">
-          <div class="box has-background-dark kpi-card">
-            <div class="has-text-centered">
-              <div class="kpi-icon-wrapper mb-3">
-                <span class="icon is-large has-text-primary">
-                  <i class="fas fa-play-circle fa-3x"></i>
-                </span>
-              </div>
-              <p class="heading">Operations</p>
-              <p class="title is-3 has-text-weight-bold">{{ filteredKPI.total_operations }}</p>
+        <div class="kpi-card cyber-cyan">
+          <div class="kpi-content">
+            <div class="kpi-header">
+              <span class="kpi-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M8 5v14l11-7z"/>
+                </svg>
+              </span>
+              <span class="kpi-label">OPERATIONS</span>
+            </div>
+            <div class="kpi-value-wrapper">
+              <span class="kpi-value">{{ filteredKPI.total_operations }}</span>
             </div>
           </div>
         </div>
 
         <!-- Attack Steps -->
-        <div class="column is-half-mobile is-one-third-tablet is-2-desktop">
-          <div class="box has-background-dark kpi-card">
-            <div class="has-text-centered">
-              <div class="kpi-icon-wrapper mb-3">
-                <span class="icon is-large has-text-warning">
-                  <i class="fas fa-crosshairs fa-3x"></i>
-                </span>
-              </div>
-              <p class="heading">Attack Steps</p>
-              <p class="title is-3 has-text-weight-bold">{{ filteredKPI.total_attack_steps }}</p>
+        <div class="kpi-card cyber-orange">
+          <div class="kpi-content">
+            <div class="kpi-header">
+              <span class="kpi-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3c-.46-4.17-3.77-7.48-7.94-7.94V1h-2v2.06C6.83 3.52 3.52 6.83 3.06 11H1v2h2.06c.46 4.17 3.77 7.48 7.94 7.94V23h2v-2.06c4.17-.46 7.48-3.77 7.94-7.94H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/>
+                </svg>
+              </span>
+              <span class="kpi-label">ATTACK_STEPS</span>
+            </div>
+            <div class="kpi-value-wrapper">
+              <span class="kpi-value">{{ filteredKPI.total_attack_steps }}</span>
             </div>
           </div>
         </div>
 
         <!-- Detections -->
-        <div class="column is-half-mobile is-one-third-tablet is-2-desktop">
-          <div class="box has-background-dark kpi-card">
-            <div class="has-text-centered">
-              <div class="kpi-icon-wrapper mb-3">
-                <span class="icon is-large has-text-danger">
-                  <i class="fas fa-bell fa-3x"></i>
-                </span>
-              </div>
-              <p class="heading">Detections</p>
-              <p class="title is-3 has-text-weight-bold">{{ filteredKPI.total_detections }}</p>
+        <div class="kpi-card cyber-pink">
+          <div class="kpi-content">
+            <div class="kpi-header">
+              <span class="kpi-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/>
+                </svg>
+              </span>
+              <span class="kpi-label">DETECTIONS</span>
+            </div>
+            <div class="kpi-value-wrapper">
+              <span class="kpi-value">{{ filteredKPI.total_detections }}</span>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- Charts Row: Tactic Coverage (Bar) + Timeline (Area) + Operations -->
-    <div class="section">
-      <div class="columns">
-        <!-- Tactic Coverage Bar Chart -->
-        <div class="column is-4">
-          <div class="box has-background-dark chart-box">
-            <h4 class="title is-5 mb-4">
-              <span class="icon has-text-info">
-                <i class="fas fa-shield-alt"></i>
-              </span>
-              Tactic Coverage
-            </h4>
-            <div class="chart-container" style="height: 280px;">
-              <Bar v-if="tacticChartData.labels.length > 0" :data="tacticChartData" :options="tacticChartOptions" />
-              <div v-else class="is-flex is-align-items-center is-justify-content-center" style="height: 100%;">
-                <p class="has-text-grey-light">No tactic coverage data</p>
-              </div>
+    <!-- Charts Section -->
+    <section class="charts-section">
+      <div class="charts-grid">
+        <!-- Tactic Coverage Chart -->
+        <div class="chart-panel">
+          <div class="panel-header">
+            <span class="panel-icon">[/\]</span>
+            <h3 class="panel-title">TACTIC_COVERAGE_ANALYSIS</h3>
+          </div>
+          <div class="chart-container">
+            <Bar v-if="tacticChartData.labels.length > 0" :data="tacticChartData" :options="tacticChartOptions" />
+            <div v-else class="no-data">
+              <span class="no-data-icon">[ ]</span>
+              <span class="no-data-text">NO_DATA_AVAILABLE</span>
             </div>
-            <p class="is-size-7 has-text-grey-light mt-3">
-              전술(Tactic)별 탐지 커버리지.
-              <span class="has-text-danger">■ 빨강(0%)</span>,
-              <span class="has-text-warning">■ 노랑(1-79%)</span>,
-              <span class="has-text-success">■ 녹색(80-100%)</span>
-            </p>
+          </div>
+          <div class="chart-legend">
+            <span class="legend-item"><span class="legend-color red"></span>GAP (0%)</span>
+            <span class="legend-item"><span class="legend-color yellow"></span>PARTIAL (1-79%)</span>
+            <span class="legend-item"><span class="legend-color green"></span>COVERED (80%+)</span>
           </div>
         </div>
 
-        <!-- Timeline Area Chart -->
-        <div class="column is-4">
-          <div class="box has-background-dark chart-box">
-            <h4 class="title is-5 mb-4">
-              <span class="icon has-text-warning">
-                <i class="fas fa-clock"></i>
-              </span>
-              Attack vs Detection Timeline
-            </h4>
-            <div class="chart-container" style="height: 280px;">
-              <Line v-if="timelineChartData.labels.length > 0" :data="timelineChartData" :options="timelineChartOptions" />
-              <div v-else class="is-flex is-align-items-center is-justify-content-center" style="height: 100%;">
-                <p class="has-text-grey-light">No timeline data</p>
-              </div>
+        <!-- Timeline Chart -->
+        <div class="chart-panel">
+          <div class="panel-header">
+            <span class="panel-icon">[~]</span>
+            <h3 class="panel-title">ATTACK_VS_DETECTION_TIMELINE</h3>
+          </div>
+          <div class="chart-container">
+            <Line v-if="timelineChartData.labels.length > 0" :data="timelineChartData" :options="timelineChartOptions" />
+            <div v-else class="no-data">
+              <span class="no-data-icon">[ ]</span>
+              <span class="no-data-text">NO_TIMELINE_DATA</span>
             </div>
-            <p class="is-size-7 has-text-grey-light mt-2">분 단위 버킷. 공격 직후의 탐지 피크를 확인하세요.</p>
           </div>
         </div>
 
-        <!-- Operations Summary -->
-        <div class="column is-4">
-          <div class="box has-background-dark chart-box">
-            <h4 class="title is-5 mb-4">
-              <span class="icon has-text-primary">
-                <i class="fas fa-play-circle"></i>
-              </span>
-              Operations
-            </h4>
-            <div class="chart-container" style="height: 280px; overflow-y: auto;">
-              <div v-if="filteredOperations.length === 0" class="notification is-info is-light">
-                <p class="is-size-7">조회된 작전이 없습니다.</p>
+        <!-- Operations Panel -->
+        <div class="chart-panel operations-panel">
+          <div class="panel-header">
+            <span class="panel-icon">[&gt;]</span>
+            <h3 class="panel-title">ACTIVE_OPERATIONS</h3>
+          </div>
+          <div class="operations-list">
+            <div v-if="filteredOperations.length === 0" class="no-data">
+              <span class="no-data-text">NO_OPERATIONS_FOUND</span>
+            </div>
+            <div v-else v-for="op in filteredOperations" :key="op.id" class="operation-card">
+              <div class="op-header">
+                <span class="op-name">{{ op.name }}</span>
+                <span class="op-status" :class="op.state">{{ op.state?.toUpperCase() }}</span>
               </div>
-              <div v-else>
-                <div v-for="op in filteredOperations" :key="op.id" class="box has-background-black-ter operation-card-small mb-3" style="padding: 1rem;">
-                  <p class="has-text-weight-semibold mb-2" style="font-size: 0.95rem; line-height: 1.3;">
-                    {{ op.name }}
-                  </p>
-                  <p class="is-size-7 has-text-grey-light mb-3 is-family-monospace" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2;">
-                    {{ op.id }}
-                  </p>
-                  <p class="is-size-7 has-text-grey mb-3" style="line-height: 1.2;">
-                    {{ formatTimestamp(op.started) }}
-                    <span v-if="op.finished"> → {{ formatTimestamp(op.finished) }}</span>
-                    <span v-else-if="op.state === 'running'" class="has-text-warning"> → running</span>
-                    <span v-else-if="op.state === 'finished'" class="has-text-success"> → finished</span>
-                    <span v-else class="has-text-info"> → {{ op.state }}</span>
-                  </p>
-                  <div class="tags are-small" style="display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 0;">
-                    <span class="tag is-info is-light">{{ op.agent_count }} agents</span>
-                    <span class="tag is-warning is-light">{{ op.attack_steps.length }} steps</span>
-                    <span class="tag is-success is-light">{{ op.techniques.length }} techniques</span>
-                  </div>
-                </div>
+              <div class="op-id">ID: {{ op.id }}</div>
+              <div class="op-time">{{ formatTimestamp(op.started) }}</div>
+              <div class="op-tags">
+                <span class="op-tag agents">{{ op.agent_count }} AGENTS</span>
+                <span class="op-tag steps">{{ op.attack_steps?.length || 0 }} STEPS</span>
+                <span class="op-tag techniques">{{ op.techniques?.length || 0 }} TECHNIQUES</span>
               </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- Week 11: MITRE ATT&CK Heat Map -->
-    <div class="section">
-      <h3 class="title is-5">
-        <span class="icon has-text-danger">
-          <i class="fas fa-fire"></i>
-        </span>
-        MITRE ATT&CK Technique Coverage
-      </h3>
-      <div class="box has-background-dark">
-        <!-- Summary Cards - Enhanced with BAS-style colors -->
-        <div class="columns is-multiline mb-4">
-          <div class="column is-3">
-            <div class="box has-background-grey-darker" style="border-left: 3px solid #b5b5b5;">
-              <p class="heading">
-                <span class="icon is-small">
-                  <i class="fas fa-crosshairs"></i>
-                </span>
-                Total Techniques
-              </p>
-              <p class="title is-4">{{ heatMapData.summary.total_techniques }}</p>
-            </div>
-          </div>
-          <div class="column is-3">
-            <div class="box has-background-grey-darker" style="border-left: 3px solid #3273dc;">
-              <p class="heading">
-                <span class="icon is-small has-text-info">
-                  <i class="fas fa-play-circle"></i>
-                </span>
-                Simulated
-              </p>
-              <p class="title is-4 has-text-info">{{ heatMapData.summary.total_simulated }}</p>
-            </div>
-          </div>
-          <div class="column is-3">
-            <div class="box has-background-grey-darker" style="border-left: 3px solid #48c774;">
-              <p class="heading">
-                <span class="icon is-small has-text-success">
-                  <i class="fas fa-check-circle"></i>
-                </span>
-                Detected
-              </p>
-              <p class="title is-4 has-text-success">{{ heatMapData.summary.total_detected }}</p>
-            </div>
-          </div>
-          <div class="column is-3">
-            <div class="box has-background-grey-darker" :style="{ borderLeft: '3px solid ' + heatMapSummaryColor }">
-              <p class="heading">
-                <span class="icon is-small" :class="heatMapSummaryColorClass">
-                  <i class="fas fa-chart-line"></i>
-                </span>
-                Detection Rate
-              </p>
-              <p class="title is-4" :class="heatMapSummaryColorClass">
-                {{ heatMapData.summary.overall_detection_rate }}%
-              </p>
-            </div>
-          </div>
+    <!-- MITRE ATT&CK Heat Map -->
+    <section class="heatmap-section">
+      <div class="section-header">
+        <span class="section-icon">[*]</span>
+        <h2 class="section-title">MITRE ATT&CK TECHNIQUE COVERAGE</h2>
+      </div>
+
+      <!-- Summary Cards -->
+      <div class="heatmap-summary">
+        <div class="summary-card">
+          <span class="summary-label">TOTAL_TECHNIQUES</span>
+          <span class="summary-value">{{ heatMapData.summary.total_techniques }}</span>
         </div>
+        <div class="summary-card blue">
+          <span class="summary-label">SIMULATED</span>
+          <span class="summary-value">{{ heatMapData.summary.total_simulated }}</span>
+        </div>
+        <div class="summary-card green">
+          <span class="summary-label">DETECTED</span>
+          <span class="summary-value">{{ heatMapData.summary.total_detected }}</span>
+        </div>
+        <div class="summary-card" :style="{ '--accent-color': heatMapSummaryColor }">
+          <span class="summary-label">DETECTION_RATE</span>
+          <span class="summary-value">{{ Math.min(heatMapData.summary.overall_detection_rate || 0, 100) }}%</span>
+        </div>
+      </div>
 
-        <!-- Techniques Table -->
-        <table class="table is-fullwidth is-hoverable is-narrow">
+      <!-- Techniques Table -->
+      <div class="table-container">
+        <table class="cyber-table">
           <thead>
             <tr>
-              <th>Status</th>
-              <th>Technique ID</th>
-              <th>Name</th>
-              <th>Tactic</th>
-              <th>Simulated</th>
-              <th>Detected</th>
-              <th>Rate</th>
+              <th>STATUS</th>
+              <th>TECHNIQUE_ID</th>
+              <th>NAME</th>
+              <th>TACTIC</th>
+              <th>SIMULATED</th>
+              <th>DETECTED</th>
+              <th>RATE</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="heatMapData.techniques.length === 0">
-              <td colspan="7" class="has-text-centered has-text-grey-light">No technique data available</td>
+              <td colspan="7" class="no-data-row">NO_TECHNIQUE_DATA_AVAILABLE</td>
             </tr>
-            <tr
-              v-for="tech in heatMapData.techniques"
-              :key="tech.id"
-              :class="{ 'has-background-danger-dark': tech.status === 'gap' }"
-              :style="tech.status === 'gap' ? { borderLeft: '3px solid #ff3860' } : {}"
-            >
+            <tr v-for="tech in heatMapData.techniques" :key="tech.id" :class="{ 'gap-row': tech.status === 'gap' }">
               <td>
-                <span
-                  class="tag is-medium"
-                  :class="{
-                    'is-danger': tech.status === 'gap',
-                    'is-warning': tech.status === 'partial',
-                    'is-success': tech.status === 'complete',
-                    'is-light': tech.status === 'not_simulated'
-                  }"
-                >
-                  <span class="icon is-small">
-                    <i
-                      class="fas"
-                      :class="{
-                        'fa-exclamation-triangle': tech.status === 'gap',
-                        'fa-exclamation-circle': tech.status === 'partial',
-                        'fa-check-circle': tech.status === 'complete',
-                        'fa-minus-circle': tech.status === 'not_simulated'
-                      }"
-                    ></i>
-                  </span>
-                  <span v-if="tech.status === 'gap'">GAP</span>
-                  <span v-else-if="tech.status === 'partial'">PARTIAL</span>
-                  <span v-else-if="tech.status === 'complete'">OK</span>
-                  <span v-else>-</span>
+                <span class="status-badge" :class="tech.status">
+                  {{ tech.status === 'gap' ? 'GAP' : tech.status === 'partial' ? 'PARTIAL' : tech.status === 'complete' ? 'OK' : '-' }}
                 </span>
               </td>
+              <td class="technique-id">{{ tech.id }}</td>
+              <td class="technique-name">{{ tech.name }}</td>
+              <td><span class="tactic-badge">{{ tech.tactic }}</span></td>
+              <td class="numeric">{{ tech.simulated }}</td>
+              <td class="numeric" :class="{ 'zero': tech.detected === 0 }">{{ tech.detected }}</td>
               <td>
-                <strong :class="{ 'has-text-danger': tech.status === 'gap' }">
-                  {{ tech.id }}
-                </strong>
-              </td>
-              <td :class="{ 'has-text-weight-semibold': tech.status === 'gap' }">
-                {{ tech.name }}
-              </td>
-              <td><span class="tag is-info is-light">{{ tech.tactic }}</span></td>
-              <td class="has-text-centered">{{ tech.simulated }}</td>
-              <td class="has-text-centered">
-                <span :class="{ 'has-text-danger has-text-weight-bold': tech.detected === 0 }">
-                  {{ tech.detected }}
-                </span>
-              </td>
-              <td>
-                <div class="is-flex is-align-items-center" style="gap: 0.5rem;">
-                  <progress
-                    class="progress is-small"
-                    :class="{
-                      'is-danger': tech.detection_rate === 0,
-                      'is-warning': tech.detection_rate > 0 && tech.detection_rate < 80,
-                      'is-success': tech.detection_rate >= 80
-                    }"
-                    :value="tech.detection_rate"
-                    max="100"
-                  >
-                    {{ tech.detection_rate }}%
-                  </progress>
-                  <span class="is-size-7 has-text-weight-semibold" style="min-width: 3rem;">
-                    {{ tech.detection_rate }}%
-                  </span>
+                <div class="rate-cell">
+                  <div class="mini-progress">
+                    <div class="mini-progress-fill" :class="tech.status" :style="{ width: Math.min(tech.detection_rate, 100) + '%' }"></div>
+                  </div>
+                  <span class="rate-value">{{ Math.min(tech.detection_rate, 100) }}%</span>
                 </div>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
 
-    <!-- Agents Table -->
-    <div class="section">
-      <h3 class="title is-5">Agents</h3>
-      <div class="box has-background-dark" style="overflow-x: auto;">
-        <div v-if="agentsData.total_agents === 0" class="notification is-info is-light">
-          <p>등록된 Agent가 없습니다.</p>
-        </div>
-        <table v-else class="table is-fullwidth is-hoverable is-narrow">
+    <!-- Agents Section -->
+    <section class="agents-section">
+      <div class="section-header">
+        <span class="section-icon">[@]</span>
+        <h2 class="section-title">CONNECTED_AGENTS</h2>
+      </div>
+      <div class="table-container">
+        <table class="cyber-table">
           <thead>
             <tr>
-              <th>Agent</th>
-              <th>Host</th>
-              <th>OS</th>
-              <th class="has-text-right">Attack Steps</th>
-              <th class="has-text-right">Detections</th>
-              <th class="has-text-right">Coverage</th>
-              <th>Last Seen</th>
+              <th>AGENT_ID</th>
+              <th>HOSTNAME</th>
+              <th>PLATFORM</th>
+              <th>ATTACK_STEPS</th>
+              <th>DETECTIONS</th>
+              <th>COVERAGE</th>
+              <th>LAST_SEEN</th>
             </tr>
           </thead>
           <tbody>
+            <tr v-if="sortedAgents.length === 0">
+              <td colspan="7" class="no-data-row">NO_AGENTS_CONNECTED</td>
+            </tr>
             <tr v-for="agent in sortedAgents.slice(0, 20)" :key="agent.paw">
-              <td>
-                <span :class="agent.alive ? 'has-text-success' : 'has-text-danger'">
-                  <i :class="agent.alive ? 'fas fa-circle' : 'far fa-circle'"></i>
-                </span>
-                {{ agent.paw }}
+              <td class="agent-cell">
+                <span class="agent-status" :class="{ online: agent.alive, offline: !agent.alive }"></span>
+                <span class="agent-paw">{{ agent.paw }}</span>
               </td>
-              <td>{{ agent.host }}</td>
-              <td><span class="tag is-info is-light is-small">{{ agent.platform }}</span></td>
-              <td class="has-text-right">{{ agent.attack_steps_count || 0 }}</td>
-              <td class="has-text-right">{{ agent.detections_count || 0 }}</td>
-              <td class="has-text-right has-text-weight-bold">
-                <span :class="(agent.attack_steps_count > 0 && agent.detections_count > 0) ? 'has-text-success' : 'has-text-grey'">
-                  {{ agent.attack_steps_count > 0 ? Math.round((agent.detections_count / agent.attack_steps_count) * 100) + '%' : '0%' }}
+              <td class="hostname">{{ agent.host }}</td>
+              <td><span class="platform-badge" :class="agent.platform?.toLowerCase()">{{ agent.platform }}</span></td>
+              <td class="numeric">{{ agent.attack_steps_count || 0 }}</td>
+              <td class="numeric">{{ agent.detections_count || 0 }}</td>
+              <td class="coverage-cell">
+                <span :class="(agent.attack_steps_count > 0 && agent.detections_count > 0) ? 'good' : 'zero'">
+                  {{ agent.attack_steps_count > 0 ? Math.min(100, Math.round((agent.detections_count / agent.attack_steps_count) * 100)) + '%' : '0%' }}
                 </span>
               </td>
-              <td class="is-size-7">{{ formatTimestamp(agent.last_seen) }}</td>
+              <td class="timestamp-cell">{{ formatTimestamp(agent.last_seen) }}</td>
             </tr>
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
 
-    <!-- Detection Events Table -->
-    <div class="section">
-      <div class="is-flex is-justify-content-space-between is-align-items-center mb-4">
-        <h3 class="title is-5">
-          Detections 매칭
-          <span v-if="selectedAgentHost" class="tag is-info is-light ml-2">
-            필터: {{ selectedAgentHost }}
-          </span>
-        </h3>
-        <button v-if="selectedAgentHost" class="button is-small is-danger is-light" @click="clearAgentFilter">
-          <span class="icon is-small">
-            <i class="fas fa-times"></i>
-          </span>
-          <span>필터 해제</span>
-        </button>
+    <!-- Detections Section -->
+    <section class="detections-section">
+      <div class="section-header">
+        <span class="section-icon">[!]</span>
+        <h2 class="section-title">DETECTION_EVENTS</h2>
+        <span class="events-count">{{ filteredDetections.length }} EVENTS</span>
+        <span v-if="selectedAgentHost" class="filter-badge">
+          FILTER: {{ selectedAgentHost }}
+          <button class="clear-filter" @click="clearAgentFilter">X</button>
+        </span>
       </div>
-
-      <div class="box has-background-dark" style="overflow-x: auto;">
-        <div v-if="filteredDetections.length === 0" class="notification is-info is-light">
-          <p>탐지된 이벤트가 없습니다.</p>
-        </div>
-        <table v-else class="table is-fullwidth is-striped is-hoverable is-narrow">
+      <div class="table-container detections-table">
+        <table class="cyber-table expandable-table">
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Agent</th>
-              <th>Rule</th>
-              <th>Level</th>
-              <th>Technique</th>
-              <th>매칭 상태</th> 
-              <th>Step</th>
-              <th>Source</th>
-              <th>Operation</th>
-              <th>Description</th>
+              <th class="expand-col"></th>
+              <th>TIMESTAMP</th>
+              <th>AGENT</th>
+              <th>RULE_ID</th>
+              <th>LEVEL</th>
+              <th>TECHNIQUE</th>
+              <th>MATCH_STATUS</th>
+              <th>DESCRIPTION</th>
             </tr>
           </thead>
           <tbody>
-            <tr
-              v-for="(event, idx) in filteredDetections.slice(0, 400)"
-              :key="idx"
-              :class="{
-                'has-background-success-dark': event.match_status === 'matched',
-                'has-background-warning-dark': event.match_status === 'partial'
-              }"
-            >
-              <td class="is-size-7">{{ formatTimestamp(event.timestamp) }}</td>
-              <td class="is-size-7">{{ event.agent_name || '-' }}</td>
-              <td class="is-size-7">{{ event.rule_id }}</td>
-              <td>
-                <span class="tag is-small" :class="'is-' + getLevelClass(event.rule_level)">
-                  {{ event.rule_level }}
-                </span>
-              </td>
-              <td>
-                <span v-if="event.technique_id" class="tag is-warning is-light is-small">
-                  {{ event.technique_id }}
-                </span>
-                <span v-else class="has-text-grey">-</span>
-              </td>
-
-              <!--  매칭 상태 -->
-              <td>
-                <span
-                  class="tag is-small"
-                  :class="{
-                    'is-success': event.match_status === 'matched',
-                    'is-warning': event.match_status === 'partial',
-                    'is-light': !event.match_status || event.match_status === 'unmatched'
-                  }"
-                >
-                  <span v-if="event.match_status === 'matched'">MATCHED</span>
-                  <span v-else-if="event.match_status === 'partial'">PARTIAL</span>
-                  <span v-else>UNMATCHED</span>
-                </span>
-              </td>
-
-              <!-- Caldera 공격 Step (link id / paw_step 등) -->
-              <td class="is-size-7">
-                <span v-if="event.attack_step_id" class="tag is-info is-light is-small">
-                  {{ event.attack_step_id }}
-                </span>
-                <span v-else class="has-text-grey">-</span>
-              </td>
-
-              <!--  탐지 소스 (Wazuh / Suricata 등) -->
-              <td class="is-size-7">
-                <span v-if="event.match_source" class="tag is-light is-small">
-                  {{ event.match_source }}
-                </span>
-                <span v-else class="has-text-grey">-</span>
-              </td>
-
-              <td class="is-size-7">{{ event.opId || '-' }}</td>
-              <td class="is-size-7" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis;">
-                {{ event.description }}
-              </td>
+            <tr v-if="filteredDetections.length === 0">
+              <td colspan="8" class="no-data-row">NO_DETECTION_EVENTS</td>
             </tr>
+            <template v-for="(event, idx) in filteredDetections.slice(0, 400)" :key="idx">
+              <tr
+                :class="{
+                  'matched-row': event.match_status === 'matched',
+                  'partial-row': event.match_status === 'partial',
+                  'expandable-row': true,
+                  'expanded': isDetectionExpanded(idx)
+                }"
+                @click="toggleDetectionDetail(idx)"
+              >
+                <td class="expand-toggle">
+                  <span class="expand-icon" :class="{ 'rotated': isDetectionExpanded(idx) }">&#9654;</span>
+                </td>
+                <td class="timestamp-cell">{{ formatTimestamp(event.timestamp) }}</td>
+                <td class="agent-name">{{ event.agent_name || '-' }}</td>
+                <td class="rule-id">{{ event.rule_id }}</td>
+                <td>
+                  <span class="level-badge" :class="getLevelClass(event.rule_level)">{{ event.rule_level }}</span>
+                </td>
+                <td>
+                  <span v-if="event.technique_id" class="technique-badge">{{ event.technique_id }}</span>
+                  <span v-else class="na">-</span>
+                </td>
+                <td>
+                  <span class="match-badge" :class="event.match_status">
+                    {{ event.match_status === 'matched' ? 'MATCHED' : event.match_status === 'partial' ? 'PARTIAL' : 'UNMATCHED' }}
+                  </span>
+                </td>
+                <td class="description-cell">{{ event.description }}</td>
+              </tr>
+              <!-- Expanded Detail Row -->
+              <tr v-if="isDetectionExpanded(idx)" class="detail-row" :class="{ 'matched-row': event.match_status === 'matched', 'partial-row': event.match_status === 'partial' }">
+                <td colspan="8">
+                  <div class="detection-detail-panel">
+                    <div class="detail-header">
+                      <span class="detail-title">[+] EVENT DETAILS</span>
+                      <span class="detail-id">IDX: {{ idx }}</span>
+                    </div>
+                    <div class="detail-grid">
+                      <div class="detail-section">
+                        <h4 class="detail-section-title">TIME & SOURCE</h4>
+                        <div class="detail-item">
+                          <span class="detail-label">FULL_TIMESTAMP:</span>
+                          <span class="detail-value monospace">{{ event.timestamp || 'N/A' }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">AGENT_ID:</span>
+                          <span class="detail-value">{{ event.agent_id || 'N/A' }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">AGENT_NAME:</span>
+                          <span class="detail-value">{{ event.agent_name || 'N/A' }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">AGENT_OS:</span>
+                          <span class="detail-value">{{ event.agent_os || 'N/A' }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">SOURCE:</span>
+                          <span class="detail-value">{{ event.match_source || 'wazuh' }}</span>
+                        </div>
+                      </div>
+                      <div class="detail-section">
+                        <h4 class="detail-section-title">DETECTION INFO</h4>
+                        <div class="detail-item">
+                          <span class="detail-label">RULE_ID:</span>
+                          <span class="detail-value highlight-blue">{{ event.rule_id }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">RULE_LEVEL:</span>
+                          <span class="detail-value">
+                            <span class="level-badge" :class="getLevelClass(event.rule_level)">{{ event.rule_level }}</span>
+                          </span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">MITRE_TECHNIQUE:</span>
+                          <span class="detail-value">
+                            <span v-if="event.technique_id" class="technique-badge">{{ event.technique_id }}</span>
+                            <span v-else class="na">N/A</span>
+                          </span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">TACTIC:</span>
+                          <span class="detail-value">
+                            <span v-if="event.tactic" class="tactic-badge">{{ event.tactic }}</span>
+                            <span v-else class="na">N/A</span>
+                          </span>
+                        </div>
+                      </div>
+                      <div class="detail-section">
+                        <h4 class="detail-section-title">CORRELATION</h4>
+                        <div class="detail-item">
+                          <span class="detail-label">MATCH_STATUS:</span>
+                          <span class="detail-value">
+                            <span class="match-badge large" :class="event.match_status">
+                              {{ event.match_status === 'matched' ? 'MATCHED' : event.match_status === 'partial' ? 'PARTIAL' : 'UNMATCHED' }}
+                            </span>
+                          </span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">ATTACK_STEP_ID:</span>
+                          <span class="detail-value monospace">{{ event.attack_step_id || 'N/A' }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">OPERATION:</span>
+                          <span class="detail-value monospace">{{ event.opId || 'N/A' }}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="detail-description">
+                      <h4 class="detail-section-title">FULL DESCRIPTION</h4>
+                      <div class="description-box">{{ event.description || 'No description available' }}</div>
+                    </div>
+
+                    <!-- RAW LOG Section -->
+                    <div class="detail-raw-log" v-if="event.full_log">
+                      <h4 class="detail-section-title">RAW LOG</h4>
+                      <pre class="raw-log-box">{{ event.full_log }}</pre>
+                    </div>
+
+                    <!-- EVENT DATA Section (Splunk-like key-value pairs) -->
+                    <div class="detail-event-data" v-if="event.raw_data && Object.keys(event.raw_data).length > 0">
+                      <h4 class="detail-section-title">EVENT DATA</h4>
+                      <div class="event-data-grid">
+                        <template v-for="(value, key) in flattenEventData(event.raw_data)" :key="key">
+                          <div class="event-data-item">
+                            <span class="event-data-key">{{ key }}:</span>
+                            <span class="event-data-value">{{ formatEventValue(value) }}</span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+
+                    <!-- SYSCHECK Section (File Integrity Monitoring) -->
+                    <div class="detail-syscheck" v-if="event.syscheck && Object.keys(event.syscheck).length > 0">
+                      <h4 class="detail-section-title">FILE INTEGRITY MONITORING</h4>
+                      <div class="event-data-grid">
+                        <div class="event-data-item" v-if="event.syscheck.path">
+                          <span class="event-data-key">path:</span>
+                          <span class="event-data-value monospace">{{ event.syscheck.path }}</span>
+                        </div>
+                        <div class="event-data-item" v-if="event.syscheck.event">
+                          <span class="event-data-key">event:</span>
+                          <span class="event-data-value">{{ event.syscheck.event }}</span>
+                        </div>
+                        <div class="event-data-item" v-if="event.syscheck.mode">
+                          <span class="event-data-key">mode:</span>
+                          <span class="event-data-value">{{ event.syscheck.mode }}</span>
+                        </div>
+                        <div class="event-data-item" v-if="event.syscheck.size_after">
+                          <span class="event-data-key">size:</span>
+                          <span class="event-data-value">{{ event.syscheck.size_after }}</span>
+                        </div>
+                        <div class="event-data-item" v-if="event.syscheck.md5_after">
+                          <span class="event-data-key">md5:</span>
+                          <span class="event-data-value monospace">{{ event.syscheck.md5_after }}</span>
+                        </div>
+                        <div class="event-data-item" v-if="event.syscheck.sha1_after">
+                          <span class="event-data-key">sha1:</span>
+                          <span class="event-data-value monospace">{{ event.syscheck.sha1_after }}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- LOCATION Section -->
+                    <div class="detail-location" v-if="event.location">
+                      <h4 class="detail-section-title">LOG SOURCE</h4>
+                      <div class="location-box monospace">{{ event.location }}</div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
 
-    <!-- Operation Correlation Section -->
-    <div class="section">
-      <h3 class="title is-5">작전 상관관계 분석</h3>
-      <div class="box has-background-dark">
-        <div class="field has-addons">
-          <div class="control is-expanded">
-            <input
-              class="input"
-              type="text"
-              v-model="correlationOperationId"
-              placeholder="Caldera 작전 ID"
-            >
-          </div>
-          <div class="control">
-            <button
-              class="button is-primary"
-              @click="correlateOperation"
-              :disabled="!correlationOperationId || isCorrelating"
-            >
-              <span class="icon">
-                <i :class="isCorrelating ? 'fas fa-spinner fa-pulse' : 'fas fa-search'"></i>
-              </span>
-              <span>{{ isCorrelating ? '분석 중...' : '분석' }}</span>
-            </button>
-          </div>
+    <!-- Correlation Section -->
+    <section class="correlation-section">
+      <div class="section-header">
+        <span class="section-icon">[&amp;]</span>
+        <h2 class="section-title">OPERATION_CORRELATION_ANALYSIS</h2>
+      </div>
+      <div class="correlation-form">
+        <div class="input-group">
+          <span class="input-label">OPERATION_ID &gt;</span>
+          <input type="text" v-model="correlationOperationId" placeholder="Enter Caldera Operation ID" class="cyber-input large">
+          <button class="analyze-btn" @click="correlateOperation" :disabled="!correlationOperationId || isCorrelating">
+            <span v-if="isCorrelating" class="btn-spinner"></span>
+            <span v-else>[ANALYZE]</span>
+          </button>
         </div>
-
-        <div v-if="correlationResult" class="notification is-info is-light mt-4">
-          <p class="title is-6">분석 결과</p>
-          <div class="content is-small">
-            <p><strong>작전:</strong> {{ correlationResult.operation_name }}</p>
-            <p><strong>탐지율:</strong> {{ formatCoverage(correlationResult.correlation.detection_rate) }}</p>
+        <div v-if="correlationResult" class="correlation-result">
+          <div class="result-header">ANALYSIS_COMPLETE</div>
+          <div class="result-content">
+            <div class="result-item">
+              <span class="result-label">OPERATION:</span>
+              <span class="result-value">{{ correlationResult.operation_name }}</span>
+            </div>
+            <div class="result-item">
+              <span class="result-label">DETECTION_RATE:</span>
+              <span class="result-value highlight">{{ formatCoverage(correlationResult.correlation.detection_rate) }}</span>
+            </div>
           </div>
         </div>
       </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="dashboard-footer">
+      <div class="footer-content">
+        <span class="footer-text">BASTION v1.0 // CALDERA-WAZUH INTEGRATION</span>
+        <span class="footer-divider">|</span>
+        <span class="footer-text">AUTO-REFRESH: 30s</span>
+      </div>
+    </footer>
     </div>
   </div>
 </template>
 
 <style scoped>
-#bastionPage {
-  padding: 1rem;
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+/* Standard Caldera Plugin Header Styles */
+.caldera-plugin-title {
+  font-size: 1.5rem;
+  font-weight: 400;
+  color: #d4d4d4;
+  margin: 0 0 0.5rem 0;
+  padding: 1rem 1.5rem 0 1.5rem;
+  font-family: inherit;
 }
 
-#bastionPage .section {
-  padding: 1rem 0;
+.caldera-plugin-description {
+  font-size: 0.95rem;
+  color: #9ca3af;
+  margin: 0;
+  padding: 0 1.5rem 1rem 1.5rem;
+  font-weight: 400;
 }
 
-#bastionPage .box {
-  border-radius: 8px;
-}
-
-#bastionPage .chart-box {
-  height: 100%;
-  min-height: 380px;
-}
-
-#bastionPage .table {
-  background-color: transparent;
-  color: #f5f5f5;
-}
-
-#bastionPage .table th {
-  color: #b5b5b5;
-  border-color: #363636;
-  font-weight: 600;
-}
-
-#bastionPage .table td {
-  border-color: #363636;
-  color: #f5f5f5;
-}
-
-#bastionPage .table.is-striped tbody tr:nth-child(even) {
-  background-color: rgba(255, 255, 255, 0.02);
-}
-
-#bastionPage .table.is-hoverable tbody tr:hover {
-  background-color: rgba(72, 199, 116, 0.1);
-}
-
-#bastionPage .heading {
-  color: #b5b5b5;
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-weight: 600;
-}
-
-#bastionPage .kpi-card {
-  transition: transform 0.2s;
-  padding: 1.5rem;
-}
-
-#bastionPage .kpi-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
-}
-
-#bastionPage .kpi-icon-wrapper {
-  display: inline-block;
-  width: 90px;
-  height: 90px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  border: 2px solid rgba(255, 255, 255, 0.1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto;
-  transition: all 0.3s ease;
-}
-
-#bastionPage .kpi-card:hover .kpi-icon-wrapper {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.2);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-}
-
-#bastionPage .kpi-icon-wrapper .icon {
+.caldera-plugin-divider {
+  border: none;
+  height: 3px;
+  background: linear-gradient(90deg, #7c3aed, #8b5cf6);
   margin: 0;
 }
 
-/* 아이콘 색상 강조 with Gradient Backgrounds */
-#bastionPage .kpi-card:has(.has-text-info) .kpi-icon-wrapper {
-  background: radial-gradient(circle, rgba(50, 152, 220, 0.2) 0%, rgba(50, 152, 220, 0.05) 100%);
-  border-color: rgba(50, 152, 220, 0.4);
+/* CSS Variables */
+.bastion-cyber-dashboard {
+  --bg-primary: #0a0e12;
+  --bg-secondary: #0f1419;
+  --bg-tertiary: #151c24;
+  --bg-card: #1a222d;
+  --border-color: #2a3a4a;
+  --text-primary: #e0e6ed;
+  --text-secondary: #8899aa;
+  --text-muted: #5a6a7a;
+  --cyber-green: #00ff88;
+  --cyber-green-dim: rgba(0, 255, 136, 0.15);
+  --cyber-blue: #00d4ff;
+  --cyber-red: #ff3366;
+  --cyber-yellow: #ffcc00;
+  --cyber-orange: #ff9500;
+  --cyber-purple: #a855f7;
+  --cyber-pink: #ec4899;
+  --cyber-cyan: #06b6d4;
+  --glow-green: 0 0 20px rgba(0, 255, 136, 0.4);
+  --glow-blue: 0 0 20px rgba(0, 212, 255, 0.4);
+  --glow-red: 0 0 20px rgba(255, 51, 102, 0.4);
 }
 
-#bastionPage .kpi-icon-wrapper .has-text-info {
-  color: #3298dc !important;
-  text-shadow: 0 0 12px rgba(50, 152, 220, 0.6);
-}
-
-#bastionPage .kpi-card:has(.has-text-success) .kpi-icon-wrapper {
-  background: radial-gradient(circle, rgba(72, 199, 116, 0.2) 0%, rgba(72, 199, 116, 0.05) 100%);
-  border-color: rgba(72, 199, 116, 0.4);
-}
-
-#bastionPage .kpi-icon-wrapper .has-text-success {
-  color: #48c774 !important;
-  text-shadow: 0 0 12px rgba(72, 199, 116, 0.6);
-}
-
-#bastionPage .kpi-card:has(.has-text-warning) .kpi-icon-wrapper {
-  background: radial-gradient(circle, rgba(255, 221, 87, 0.2) 0%, rgba(255, 221, 87, 0.05) 100%);
-  border-color: rgba(255, 221, 87, 0.4);
-}
-
-#bastionPage .kpi-icon-wrapper .has-text-warning {
-  color: #ffdd57 !important;
-  text-shadow: 0 0 12px rgba(255, 221, 87, 0.6);
-}
-
-#bastionPage .kpi-card:has(.has-text-danger) .kpi-icon-wrapper {
-  background: radial-gradient(circle, rgba(241, 70, 104, 0.2) 0%, rgba(241, 70, 104, 0.05) 100%);
-  border-color: rgba(241, 70, 104, 0.4);
-}
-
-#bastionPage .kpi-icon-wrapper .has-text-danger {
-  color: #f14668 !important;
-  text-shadow: 0 0 12px rgba(241, 70, 104, 0.6);
-}
-
-#bastionPage .kpi-card:has(.has-text-primary) .kpi-icon-wrapper {
-  background: radial-gradient(circle, rgba(121, 87, 213, 0.2) 0%, rgba(121, 87, 213, 0.05) 100%);
-  border-color: rgba(121, 87, 213, 0.4);
-}
-
-#bastionPage .kpi-icon-wrapper .has-text-primary {
-  color: #7957d5 !important;
-  text-shadow: 0 0 12px rgba(121, 87, 213, 0.6);
-}
-
-#bastionPage .kpi-card:has(.has-text-grey) .kpi-icon-wrapper {
-  background: radial-gradient(circle, rgba(181, 181, 181, 0.15) 0%, rgba(181, 181, 181, 0.05) 100%);
-  border-color: rgba(181, 181, 181, 0.3);
-}
-
-#bastionPage .kpi-icon-wrapper .has-text-grey {
-  color: #b5b5b5 !important;
-  text-shadow: 0 0 12px rgba(181, 181, 181, 0.4);
-}
-
-#bastionPage .operation-card-small {
-  transition: all 0.2s;
-  border-left: 3px solid transparent;
-}
-
-#bastionPage .operation-card-small:hover {
-  transform: translateY(-2px);
-  border-left-color: #3273dc;
-}
-
-/* Bar Chart Styles */
-.bar-container {
-  margin-bottom: 8px;
-}
-
-.bar-background {
+/* Base Styles */
+.bastion-cyber-dashboard {
   position: relative;
-  height: 24px;
-  background-color: rgba(255, 255, 255, 0.05);
-  border-radius: 4px;
+  min-height: 100vh;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+/* Scanline Overlay */
+.scanline-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 1000;
+}
+
+/* Grid Background */
+.grid-background {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-image:
+    linear-gradient(rgba(0, 255, 136, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 136, 0.03) 1px, transparent 1px);
+  background-size: 50px 50px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Header */
+.dashboard-header {
+  position: relative;
+  z-index: 10;
+  padding: 1.5rem 2rem;
+  background: linear-gradient(180deg, var(--bg-secondary) 0%, transparent 100%);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.header-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1800px;
+  margin: 0 auto;
+}
+
+.logo-section {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.logo-icon {
+  width: 60px;
+  height: 60px;
+  color: var(--cyber-green);
+  filter: drop-shadow(var(--glow-green));
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { filter: drop-shadow(0 0 10px rgba(0, 255, 136, 0.4)); }
+  50% { filter: drop-shadow(0 0 25px rgba(0, 255, 136, 0.8)); }
+}
+
+.shield-icon {
+  width: 100%;
+  height: 100%;
+}
+
+.main-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: var(--cyber-green);
+  letter-spacing: 0.3em;
+  text-shadow: var(--glow-green);
+  margin: 0;
+}
+
+.subtitle-text {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.2em;
+  margin: 0;
+}
+
+.header-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+}
+
+.status-indicator.online .status-text {
+  color: var(--cyber-green);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--cyber-green);
+  border-radius: 50%;
+  position: relative;
+}
+
+.pulse-ring {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--cyber-green);
+  border-radius: 50%;
+  animation: pulse-ring 1.5s ease-out infinite;
+  margin-left: -4px;
+  margin-top: -4px;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.5); opacity: 1; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+.timestamp {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.header-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--cyber-green), transparent);
+  margin-top: 1rem;
+  opacity: 0.3;
+}
+
+/* Sections */
+section {
+  position: relative;
+  z-index: 10;
+  padding: 1.5rem 2rem;
+  max-width: 1800px;
+  margin: 0 auto;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.section-icon {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--cyber-green);
+  font-size: 1rem;
+}
+
+.section-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.1em;
+  margin: 0;
+}
+
+/* Filters Section */
+.filters-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--cyber-green);
+  margin: 1rem 2rem;
+  padding: 1.25rem;
+}
+
+.filters-section .section-header {
+  margin-bottom: 1rem;
+}
+
+.refresh-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: transparent;
+  border: 1px solid var(--cyber-green);
+  color: var(--cyber-green);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  background: var(--cyber-green-dim);
+  box-shadow: var(--glow-green);
+}
+
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-icon {
+  font-size: 1rem;
+}
+
+.btn-icon.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.filters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+}
+
+.filter-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.filter-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.input-wrapper {
+  display: flex;
+  align-items: center;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  padding: 0 0.75rem;
+}
+
+.input-wrapper:focus-within {
+  border-color: var(--cyber-green);
+  box-shadow: 0 0 10px rgba(0, 255, 136, 0.2);
+}
+
+.input-prefix {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--cyber-green);
+  margin-right: 0.5rem;
+}
+
+.cyber-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  padding: 0.75rem 0;
+  outline: none;
+}
+
+.cyber-input::placeholder {
+  color: var(--text-muted);
+}
+
+.select-wrapper {
+  position: relative;
+}
+
+.cyber-select {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  padding: 0.75rem;
+  cursor: pointer;
+  appearance: none;
+}
+
+.cyber-select:focus {
+  border-color: var(--cyber-green);
+  outline: none;
+  box-shadow: 0 0 10px rgba(0, 255, 136, 0.2);
+}
+
+/* KPI Section */
+.kpi-section {
+  padding-top: 0.5rem;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.kpi-card {
+  position: relative;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1.25rem;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 100%;
+  background: var(--accent-color, var(--border-color));
+}
+
+.kpi-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--accent-color, var(--cyber-green));
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}
+
+.kpi-card.featured {
+  grid-column: span 2;
+  background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-tertiary) 100%);
+}
+
+.kpi-card.featured::before {
+  width: 4px;
+}
+
+.kpi-card.cyber-green { --accent-color: var(--cyber-green); }
+.kpi-card.cyber-blue { --accent-color: var(--cyber-blue); }
+.kpi-card.cyber-red { --accent-color: var(--cyber-red); }
+.kpi-card.cyber-yellow { --accent-color: var(--cyber-yellow); }
+.kpi-card.cyber-orange { --accent-color: var(--cyber-orange); }
+.kpi-card.cyber-purple { --accent-color: var(--cyber-purple); }
+.kpi-card.cyber-pink { --accent-color: var(--cyber-pink); }
+.kpi-card.cyber-cyan { --accent-color: var(--cyber-cyan); }
+
+.kpi-glow {
+  position: absolute;
+  top: -50%;
+  right: -50%;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle, var(--accent-color) 0%, transparent 70%);
+  opacity: 0.05;
+}
+
+.kpi-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.kpi-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--accent-color, var(--text-muted));
+}
+
+.kpi-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.kpi-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.kpi-value-wrapper {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+}
+
+.kpi-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--accent-color, var(--text-primary));
+  line-height: 1;
+}
+
+.kpi-value.large {
+  font-size: 3rem;
+}
+
+.kpi-unit {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.kpi-grade {
+  margin-top: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+}
+
+.grade-label {
+  color: var(--text-muted);
+}
+
+.grade-value {
+  color: var(--accent-color);
+  font-weight: 700;
+  margin-left: 0.25rem;
+}
+
+.progress-bar {
+  position: relative;
+  height: 4px;
+  background: var(--bg-primary);
+  margin-top: 1rem;
   overflow: hidden;
 }
 
-.bar-executed {
+.progress-fill {
+  height: 100%;
+  background: var(--accent-color, var(--cyber-green));
+  transition: width 0.5s ease;
+}
+
+.progress-glow {
   position: absolute;
   top: 0;
   left: 0;
+  width: 100%;
   height: 100%;
-  background-color: #ffe08a;
-  transition: width 0.3s ease;
-  opacity: 0.6;
+  background: linear-gradient(90deg, transparent, var(--accent-color, var(--cyber-green)), transparent);
+  animation: progress-sweep 2s linear infinite;
+  opacity: 0.3;
 }
 
-.bar-detected {
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 100%;
-  background-color: #48c774;
-  transition: width 0.3s ease;
-  opacity: 0.8;
+@keyframes progress-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 
-/* Scrollbar styling */
-.chart-container::-webkit-scrollbar {
+/* Charts Section */
+.charts-section {
+  padding-top: 0.5rem;
+}
+
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+.chart-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1.25rem;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.panel-icon {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--cyber-green);
+  font-size: 0.9rem;
+}
+
+.panel-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.05em;
+  margin: 0;
+}
+
+.chart-container {
+  height: 280px;
+}
+
+.chart-legend {
+  display: flex;
+  justify-content: center;
+  gap: 1.5rem;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.legend-color {
+  width: 12px;
+  height: 12px;
+}
+
+.legend-color.red { background: var(--cyber-red); }
+.legend-color.yellow { background: var(--cyber-yellow); }
+.legend-color.green { background: var(--cyber-green); }
+
+.no-data {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+}
+
+.no-data-icon {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.no-data-text {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+}
+
+/* Operations Panel */
+.operations-panel .chart-container {
+  overflow-y: auto;
+}
+
+.operations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.operation-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--cyber-blue);
+  padding: 1rem;
+  transition: all 0.2s;
+}
+
+.operation-card:hover {
+  border-left-color: var(--cyber-green);
+  background: var(--bg-secondary);
+}
+
+.op-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.op-name {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.op-status {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid;
+}
+
+.op-status.running {
+  color: var(--cyber-yellow);
+  border-color: var(--cyber-yellow);
+}
+
+.op-status.finished {
+  color: var(--cyber-green);
+  border-color: var(--cyber-green);
+}
+
+.op-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.op-time {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.op-tags {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.op-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  padding: 0.2rem 0.5rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+}
+
+.op-tag.agents { color: var(--cyber-blue); border-color: var(--cyber-blue); }
+.op-tag.steps { color: var(--cyber-orange); border-color: var(--cyber-orange); }
+.op-tag.techniques { color: var(--cyber-green); border-color: var(--cyber-green); }
+
+/* Heat Map Section */
+.heatmap-section {
+  padding-top: 0.5rem;
+}
+
+.heatmap-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.summary-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--accent-color, var(--text-muted));
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.summary-card.blue { --accent-color: var(--cyber-blue); }
+.summary-card.green { --accent-color: var(--cyber-green); }
+
+.summary-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.summary-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--accent-color, var(--text-primary));
+}
+
+/* Tables */
+.table-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  overflow-x: auto;
+}
+
+.cyber-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.cyber-table th {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--cyber-green);
+  background: var(--bg-secondary);
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.cyber-table td {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.cyber-table tr:hover {
+  background: rgba(0, 255, 136, 0.03);
+}
+
+.cyber-table .no-data-row {
+  text-align: center;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  padding: 2rem;
+}
+
+.cyber-table .gap-row {
+  background: rgba(255, 51, 102, 0.1);
+  border-left: 3px solid var(--cyber-red);
+}
+
+.cyber-table .gap-row td {
+  color: var(--text-primary);
+}
+
+.cyber-table .matched-row {
+  background: rgba(0, 255, 136, 0.08);
+}
+
+.cyber-table .partial-row {
+  background: rgba(255, 204, 0, 0.08);
+}
+
+/* Badges */
+.status-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid;
+}
+
+.status-badge.gap {
+  color: var(--cyber-red);
+  border-color: var(--cyber-red);
+  background: rgba(255, 51, 102, 0.1);
+}
+
+.status-badge.partial {
+  color: var(--cyber-yellow);
+  border-color: var(--cyber-yellow);
+  background: rgba(255, 204, 0, 0.1);
+}
+
+.status-badge.complete {
+  color: var(--cyber-green);
+  border-color: var(--cyber-green);
+  background: rgba(0, 255, 136, 0.1);
+}
+
+.technique-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.technique-name {
+  color: var(--text-primary);
+}
+
+.tactic-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  padding: 0.2rem 0.5rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--cyber-blue);
+  color: var(--cyber-blue);
+}
+
+.numeric {
+  font-family: 'JetBrains Mono', monospace;
+  text-align: center;
+}
+
+.numeric.zero {
+  color: var(--cyber-red);
+  font-weight: 700;
+}
+
+.rate-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.mini-progress {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.mini-progress-fill {
+  height: 100%;
+  transition: width 0.3s;
+}
+
+.mini-progress-fill.gap { background: var(--cyber-red); }
+.mini-progress-fill.partial { background: var(--cyber-yellow); }
+.mini-progress-fill.complete { background: var(--cyber-green); }
+
+.rate-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  min-width: 3rem;
+}
+
+/* Agent Table */
+.agent-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.agent-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.agent-status.online {
+  background: var(--cyber-green);
+  box-shadow: 0 0 8px var(--cyber-green);
+}
+
+.agent-status.offline {
+  background: var(--cyber-red);
+}
+
+.agent-paw {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+}
+
+.hostname {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.platform-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid;
+}
+
+.platform-badge.windows {
+  color: var(--cyber-blue);
+  border-color: var(--cyber-blue);
+}
+
+.platform-badge.linux {
+  color: var(--cyber-orange);
+  border-color: var(--cyber-orange);
+}
+
+.platform-badge.darwin {
+  color: var(--cyber-purple);
+  border-color: var(--cyber-purple);
+}
+
+.coverage-cell .good {
+  color: var(--cyber-green);
+  font-weight: 700;
+}
+
+.coverage-cell .zero {
+  color: var(--text-muted);
+}
+
+.timestamp-cell {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* Detections Table */
+.detections-table {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.rule-id {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.level-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.2rem 0.4rem;
+  min-width: 2rem;
+  text-align: center;
+  display: inline-block;
+}
+
+.level-badge.critical {
+  background: var(--cyber-red);
+  color: white;
+}
+
+.level-badge.high {
+  background: var(--cyber-orange);
+  color: var(--bg-primary);
+}
+
+.level-badge.medium {
+  background: var(--cyber-yellow);
+  color: var(--bg-primary);
+}
+
+.level-badge.low {
+  background: var(--text-muted);
+  color: var(--bg-primary);
+}
+
+.technique-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  padding: 0.2rem 0.5rem;
+  background: rgba(255, 204, 0, 0.1);
+  border: 1px solid var(--cyber-yellow);
+  color: var(--cyber-yellow);
+}
+
+.match-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid;
+}
+
+.match-badge.matched {
+  color: var(--cyber-green);
+  border-color: var(--cyber-green);
+  background: rgba(0, 255, 136, 0.1);
+}
+
+.match-badge.partial {
+  color: var(--cyber-yellow);
+  border-color: var(--cyber-yellow);
+  background: rgba(255, 204, 0, 0.1);
+}
+
+.match-badge.unmatched {
+  color: var(--text-muted);
+  border-color: var(--border-color);
+  background: transparent;
+}
+
+.step-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  padding: 0.2rem 0.4rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--cyber-cyan);
+  color: var(--cyber-cyan);
+  max-width: 150px;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  padding: 0.2rem 0.4rem;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+}
+
+.na {
+  color: var(--text-muted);
+}
+
+.operation-cell {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.description-cell {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Correlation Section */
+.correlation-section {
+  padding-top: 0.5rem;
+}
+
+.correlation-form {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1.5rem;
+}
+
+.input-group {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.input-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--cyber-green);
+  white-space: nowrap;
+}
+
+.cyber-input.large {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  padding: 0.75rem 1rem;
+}
+
+.cyber-input.large:focus {
+  border-color: var(--cyber-green);
+  outline: none;
+  box-shadow: 0 0 10px rgba(0, 255, 136, 0.2);
+}
+
+.analyze-btn {
+  background: var(--cyber-green);
+  border: none;
+  color: var(--bg-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.75rem 1.5rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.analyze-btn:hover:not(:disabled) {
+  box-shadow: var(--glow-green);
+  transform: translateY(-2px);
+}
+
+.analyze-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--bg-primary);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.correlation-result {
+  margin-top: 1.5rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--cyber-green);
+  padding: 1rem;
+}
+
+.result-header {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--cyber-green);
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.result-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.result-item {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.result-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.result-value {
+  font-family: 'IBM Plex Sans', sans-serif;
+  color: var(--text-primary);
+}
+
+.result-value.highlight {
+  color: var(--cyber-green);
+  font-weight: 700;
+}
+
+/* Footer */
+.dashboard-footer {
+  position: relative;
+  z-index: 10;
+  padding: 1.5rem 2rem;
+  margin-top: 2rem;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.footer-content {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+}
+
+.footer-text {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+}
+
+.footer-divider {
+  color: var(--border-color);
+}
+
+/* Filter Badge */
+.filter-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--cyber-cyan);
+  background: rgba(6, 182, 212, 0.1);
+  border: 1px solid var(--cyber-cyan);
+  padding: 0.25rem 0.75rem;
+  margin-left: auto;
+}
+
+.clear-filter {
+  background: transparent;
+  border: none;
+  color: var(--cyber-red);
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+}
+
+/* Events Count Badge */
+.events-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--cyber-cyan);
+  background: rgba(6, 182, 212, 0.1);
+  border: 1px solid var(--cyber-cyan);
+  padding: 0.25rem 0.75rem;
+  margin-left: 1rem;
+}
+
+/* Expandable Table Styles */
+.expandable-table .expand-col {
+  width: 30px;
+  min-width: 30px;
+}
+
+.expandable-row {
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.expandable-row:hover {
+  background: rgba(0, 255, 136, 0.08) !important;
+}
+
+.expandable-row.expanded {
+  background: rgba(0, 212, 255, 0.08) !important;
+}
+
+.expand-toggle {
+  text-align: center;
+  padding: 0.6rem 0.5rem !important;
+}
+
+.expand-icon {
+  display: inline-block;
+  color: var(--cyber-green);
+  font-size: 0.7rem;
+  transition: transform 0.2s ease;
+}
+
+.expand-icon.rotated {
+  transform: rotate(90deg);
+}
+
+/* Detail Row Styles */
+.detail-row {
+  background: var(--bg-secondary) !important;
+}
+
+.detail-row td {
+  padding: 0 !important;
+  border-bottom: 2px solid var(--cyber-green);
+}
+
+.detection-detail-panel {
+  padding: 1.25rem;
+  background: linear-gradient(135deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
+  border-left: 3px solid var(--cyber-green);
+  margin: 0;
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 0.75rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.detail-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--cyber-green);
+  letter-spacing: 0.05em;
+}
+
+.detail-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.detail-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1rem;
+}
+
+.detail-section-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--cyber-blue);
+  letter-spacing: 0.05em;
+  margin: 0 0 0.75rem 0;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.detail-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 0.5rem;
+  gap: 0.5rem;
+}
+
+.detail-item:last-child {
+  margin-bottom: 0;
+}
+
+.detail-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.detail-value {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  text-align: right;
+  word-break: break-word;
+}
+
+.detail-value.monospace {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+}
+
+.detail-value.highlight-blue {
+  color: var(--cyber-blue);
+  font-weight: 600;
+}
+
+.match-badge.large {
+  padding: 0.3rem 0.75rem;
+  font-size: 0.75rem;
+}
+
+.detail-description {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1rem;
+}
+
+.description-box {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-primary);
+  padding: 0.75rem;
+  border-left: 2px solid var(--cyber-yellow);
+}
+
+/* RAW LOG Section */
+.detail-raw-log {
+  margin-top: 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1rem;
+}
+
+.raw-log-box {
+  font-family: 'IBM Plex Mono', 'Consolas', monospace;
+  font-size: 0.8rem;
+  color: var(--cyber-green);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: #0a0f14;
+  padding: 1rem;
+  border-left: 3px solid var(--cyber-green);
+  margin: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* EVENT DATA Section (Splunk-like) */
+.detail-event-data,
+.detail-syscheck {
+  margin-top: 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1rem;
+}
+
+.event-data-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 0.5rem;
+}
+
+.event-data-item {
+  display: flex;
+  align-items: flex-start;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-primary);
+  border-left: 2px solid var(--cyber-blue);
+  font-size: 0.8rem;
+}
+
+.event-data-key {
+  color: var(--cyber-blue);
+  font-weight: 600;
+  min-width: 150px;
+  margin-right: 0.5rem;
+  flex-shrink: 0;
+}
+
+.event-data-value {
+  color: var(--text-primary);
+  word-break: break-all;
+  flex: 1;
+}
+
+.event-data-value.monospace {
+  font-family: 'IBM Plex Mono', 'Consolas', monospace;
+  font-size: 0.75rem;
+}
+
+/* LOCATION Section */
+.detail-location {
+  margin-top: 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1rem;
+}
+
+.location-box {
+  font-family: 'IBM Plex Mono', 'Consolas', monospace;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 0.5rem 0.75rem;
+  border-left: 2px solid var(--cyber-purple);
+}
+
+@media (max-width: 1200px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+  .event-data-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 
-.chart-container::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 3px;
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
 }
 
-.chart-container::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 3px;
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
 }
 
-.chart-container::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.3);
+::-webkit-scrollbar-thumb:hover {
+  background: var(--cyber-green);
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .heatmap-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .kpi-card.featured {
+    grid-column: span 1;
+  }
+}
+
+@media (max-width: 768px) {
+  .header-content {
+    flex-direction: column;
+    text-align: center;
+    gap: 1rem;
+  }
+
+  .header-status {
+    align-items: center;
+  }
+
+  .filters-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .heatmap-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .input-group {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>
