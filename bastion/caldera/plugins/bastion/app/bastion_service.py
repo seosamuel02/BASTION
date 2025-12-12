@@ -1288,12 +1288,45 @@ class BASTIONService:
                 "size": 1000,
                 "sort": [{"timestamp": {"order": "asc"}}],
                 "_source": [
-                    "@timestamp", "timestamp", "rule.id", "rule.level", "rule.description",
-                    "data.mitre", "data.mitre.id", "data.mitre.tactic",
-                    "agent.id", "agent.name", "agent.ip", "rule.mitre.technique", "rule.mitre.id",
-                    "location", "full_log", "data.audit.command", "data.audit.exe",
-                    "data.audit.type", "data.audit.cwd", "data.srcip", "data.dstip"
+                    "@timestamp",
+                    "timestamp",
+
+                    # Rule / MITRE
+                    "rule.id",
+                    "rule.level",
+                    "rule.description",
+                    "rule.mitre.technique",
+                    "rule.mitre.id",
+                    "data.mitre",
+                    "data.mitre.id",
+                    "data.mitre.tactic",
+
+                    # Agent
+                    "agent.id",
+                    "agent.name",
+                    "agent.ip",
+
+                    # Raw / Detail view (Splunk-like)
+                    "full_log",
+                    "data",
+                    "syscheck",
+                    "predecoder",
+                    "decoder",
+
+                    # Audit (command-level visibility)
+                    "data.audit.command",
+                    "data.audit.exe",
+                    "data.audit.type",
+                    "data.audit.cwd",
+
+                    # Network
+                    "data.srcip",
+                    "data.dstip",
+
+                    # Misc
+                    "location",
                 ]
+
             }
 
             detected_techniques = set()
@@ -1359,36 +1392,55 @@ class BASTIONService:
                             agent_id = source.get('agent', {}).get('id')
                             agent_os = wazuh_agent_os_map.get(agent_id, 'unknown')
 
-                            # 상세 정보 필드 추출
-                            data_obj = source.get('data', {})
-                            audit_obj = data_obj.get('audit', {}) if isinstance(data_obj, dict) else {}
+                                # 상세 / Raw 이벤트 데이터 추출
+                                data_obj = source.get('data', {}) if isinstance(source.get('data'), dict) else {}
+                                audit_obj = data_obj.get('audit', {}) if isinstance(data_obj.get('audit'), dict) else {}
 
-                            detection_events.append({
-                                'doc_id': doc_id,
-                                'timestamp': ts,
-                                'rule_id': source.get('rule', {}).get('id'),
-                                'rule_level': source.get('rule', {}).get('level'),
-                                'description': source.get('rule', {}).get('description'),
-                                'agent_name': source.get('agent', {}).get('name'),
-                                'agent_id': agent_id,
-                                'agent_ip': source.get('agent', {}).get('ip'),
-                                'agent_os': agent_os,
-                                'technique_id': technique_id,
-                                'tactic': tactic,
-                                'match_status': 'unmatched',
-                                'attack_step_id': None,
-                                'match_source': 'wazuh',
-                                'opId': None,
-                                # 상세 정보 필드
-                                'location': source.get('location'),
-                                'full_log': source.get('full_log'),
-                                'audit_command': audit_obj.get('command'),
-                                'audit_exe': audit_obj.get('exe'),
-                                'audit_type': audit_obj.get('type'),
-                                'audit_cwd': audit_obj.get('cwd'),
-                                'srcip': data_obj.get('srcip') if isinstance(data_obj, dict) else None,
-                                'dstip': data_obj.get('dstip') if isinstance(data_obj, dict) else None,
-                            })
+                                raw_data = data_obj
+                                syscheck_data = source.get('syscheck', {}) if isinstance(source.get('syscheck'), dict) else {}
+
+                                # full_log 구성 (fallback 포함)
+                                full_log = source.get('full_log', '')
+                                if not full_log and isinstance(audit_obj, dict):
+                                    full_log = audit_obj.get('command') or audit_obj.get('exe') or ''
+
+                                detection_events.append({
+                                    'doc_id': doc_id,
+                                    'timestamp': ts,
+                                    'rule_id': source.get('rule', {}).get('id'),
+                                    'rule_level': source.get('rule', {}).get('level'),
+                                    'description': source.get('rule', {}).get('description'),
+                                    'agent_name': source.get('agent', {}).get('name'),
+                                    'agent_id': agent_id,
+                                    'agent_ip': source.get('agent', {}).get('ip'),
+                                    'agent_os': agent_os,
+                                    'technique_id': technique_id,
+                                    'tactic': tactic,
+                                    'match_status': 'unmatched',
+                                    'attack_step_id': None,
+                                    'match_source': 'wazuh',
+                                    'opId': None,
+
+                                    # 🔽 분석 / UI 공용 필드
+                                    'full_log': full_log,
+                                    'location': source.get('location'),
+
+                                    # 🔽 Audit 상세
+                                    'audit_command': audit_obj.get('command'),
+                                    'audit_exe': audit_obj.get('exe'),
+                                    'audit_type': audit_obj.get('type'),
+                                    'audit_cwd': audit_obj.get('cwd'),
+
+                                    # 🔽 네트워크
+                                    'srcip': data_obj.get('srcip'),
+                                    'dstip': data_obj.get('dstip'),
+
+                                    # 🔽 원본 이벤트 (Splunk-like Detail View)
+                                    'raw_data': raw_data,
+                                    'syscheck': syscheck_data,
+                                    'predecoder': source.get('predecoder', {}),
+                                    'decoder': source.get('decoder', {}),
+                                })
 
             # 3-A. Reflect match info to detection_events based on IntegrationEngine
             self.log.info(
@@ -1804,13 +1856,44 @@ class BASTIONService:
 
         - Collect simulated technique stats from Caldera operation links
         - Count detected techniques by querying Wazuh Indexer alerts
+        - Supports filters: operation_id, os_filter, search
         """
         try:
             hours = int(request.query.get('hours', 24))
-            self.log.info(f'[BASTION] Technique coverage analysis: Last {hours} hours')
+            operation_id = request.query.get('operation_id')
+            os_filter = request.query.get('os_filter')
+            search = request.query.get('search', '').lower()
+
+            self.log.info(
+                f'[BASTION] Technique coverage analysis: Last {hours} hours, '
+                f'operation_id={operation_id}, os_filter={os_filter}, search={search}'
+            )
 
             now_utc = datetime.utcnow()
             cutoff_time = now_utc - timedelta(hours=hours)
+
+            # Build agent platform map and filter by OS
+            all_agents = await self.data_svc.locate('agents')
+            agent_platforms = {}
+            filtered_agent_paws = set()
+
+            for agent in all_agents:
+                platform = getattr(agent, 'platform', 'unknown')
+                agent_platforms[agent.paw] = platform.lower()
+
+                # Apply OS filter
+                if os_filter and os_filter.lower() != 'all':
+                    if os_filter.lower() not in platform.lower():
+                        continue
+
+                # Apply search filter to agent
+                if search:
+                    agent_host = getattr(agent, 'host', '') or ''
+                    agent_user = getattr(agent, 'username', '') or ''
+                    if search not in agent_host.lower() and search not in agent_user.lower() and search not in agent.paw.lower():
+                        continue
+
+                filtered_agent_paws.add(agent.paw)
 
             # 1. Aggregate "simulated" techniques based on Caldera operations & links
             technique_stats: Dict[str, Dict[str, Any]] = {}
@@ -1818,6 +1901,10 @@ class BASTIONService:
             operations = await self.data_svc.locate('operations')
             for op in operations:
                 if not op.start:
+                    continue
+
+                # Filter by operation_id if specified
+                if operation_id and operation_id != 'all' and op.id != operation_id:
                     continue
 
                 # Unify as naive for comparison (timezone-aware -> naive)
@@ -1836,16 +1923,33 @@ class BASTIONService:
                     continue
 
                 for link in op.chain:
+                    # Apply OS filter - skip if agent doesn't match
+                    link_paw = getattr(link, 'paw', None)
+                    if os_filter and os_filter.lower() != 'all':
+                        agent_platform = agent_platforms.get(link_paw, '')
+                        if os_filter.lower() not in agent_platform:
+                            continue
+
                     ability = getattr(link, 'ability', None)
                     if not ability or not ability.technique_id:
                         continue
 
                     tech_id = ability.technique_id
+                    tech_name = ability.technique_name or tech_id
+                    tactic = ability.tactic or 'unknown'
+
+                    # Apply search filter to technique
+                    if search:
+                        if (search not in tech_id.lower() and
+                            search not in tech_name.lower() and
+                            search not in tactic.lower()):
+                            continue
+
                     if tech_id not in technique_stats:
                         technique_stats[tech_id] = {
                             'id': tech_id,
-                            'name': ability.technique_name or tech_id,
-                            'tactic': ability.tactic or 'unknown',
+                            'name': tech_name,
+                            'tactic': tactic,
                             'simulated': 0,
                             'detected': 0,
                         }
@@ -1888,15 +1992,22 @@ class BASTIONService:
                     self.log.warning(f"[BASTION] IntegrationEngine을 이용한 탐지 집계 실패: {e}")
 
             # 3. Calculate Detection rate / status
+            # NOTE: Detection rate should be based on whether the technique was detected,
+            # not on the raw count of alerts. Each simulated attack should count as 1,
+            # and if at least 1 alert matched, that counts as 1 detection.
+            # Rate = min(detected_count, simulated_count) / simulated_count * 100
+            # This caps the rate at 100% maximum.
             techniques: List[Dict[str, Any]] = []
             for tech_id, stats in technique_stats.items():
                 simulated = stats["simulated"]
-                detected = stats["detected"]
-                rate = (detected / simulated * 100.0) if simulated > 0 else 0.0
+                detected_raw = stats["detected"]
+                # Cap detected count at simulated count to prevent >100% rates
+                detected_capped = min(detected_raw, simulated) if simulated > 0 else 0
+                rate = (detected_capped / simulated * 100.0) if simulated > 0 else 0.0
 
                 if simulated == 0:
                     status = "not_simulated"  # Gray
-                elif detected == 0:
+                elif detected_raw == 0:
                     status = "gap"            # Red
                 elif rate < 80:
                     status = "partial"        # Yellow
@@ -1908,7 +2019,8 @@ class BASTIONService:
                     "name": stats["name"],
                     "tactic": stats["tactic"],
                     "simulated": simulated,
-                    "detected": detected,
+                    "detected": detected_capped,  # Use capped value for display
+                    "detected_raw": detected_raw,  # Keep raw count for debugging
                     "detection_rate": round(rate, 1),
                     "status": status,
                 })
@@ -1931,22 +2043,21 @@ class BASTIONService:
             for t in tactics.values():
                 total = t["total_simulated"]
                 detected = t["total_detected"]
-                t["coverage"] = round((detected / total * 100.0) if total > 0 else 0.0, 1)
+                # Coverage is already using capped detected values, but ensure max 100%
+                coverage = (detected / total * 100.0) if total > 0 else 0.0
+                t["coverage"] = round(min(coverage, 100.0), 1)
+
+            total_simulated = sum(t["simulated"] for t in techniques)
+            total_detected = sum(t["detected"] for t in techniques)
+            # Ensure overall rate never exceeds 100%
+            overall_rate = (total_detected / total_simulated * 100.0) if total_simulated > 0 else 0.0
+            overall_rate = min(overall_rate, 100.0)
 
             summary = {
                 "total_techniques": len(techniques),
-                "total_simulated": sum(t["simulated"] for t in techniques),
-                "total_detected": sum(t["detected"] for t in techniques),
-                "overall_detection_rate": round(
-                    (
-                        sum(t["detected"] for t in techniques)
-                        / sum(t["simulated"] for t in techniques)
-                        * 100.0
-                    )
-                    if techniques and sum(t["simulated"] for t in techniques) > 0
-                    else 0.0,
-                    1,
-                ),
+                "total_simulated": total_simulated,
+                "total_detected": total_detected,
+                "overall_detection_rate": round(overall_rate, 1),
             }
 
             return web.json_response({

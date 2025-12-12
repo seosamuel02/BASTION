@@ -4,8 +4,16 @@ bastion/.env
 # Claude Code specific files
 CLAUDE.md
 PR_PREPARATION.md
+BASTION_PRD.md
 .mcp.json
 .claude/
+
+# Test tools
+testsprite_tests/
+.playwright-mcp/
+
+# Wazuh rules (separate from plugin)
+bastion/wazuh-rules/
 
 # Python
 __pycache__/
