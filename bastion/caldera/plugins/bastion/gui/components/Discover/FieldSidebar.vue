@@ -1,7 +1,7 @@
 <!-- FieldSidebar.vue: 필드 목록 사이드바 (토글 열림/닫힘) -->
 <template>
   <div class="field-sidebar" :class="{ collapsed: !open }">
-    <button class="toggle" @click="$emit('toggle')">
+    <button class="toggle" type="button" @click="$emit('toggle')">
       <span v-if="open">◀ 필드</span>
       <span v-else>필드 ▶</span>
     </button>
@@ -19,11 +19,34 @@
 
       <div class="section">
         <p class="section-title">Available fields</p>
+
+        <!-- 전체 로그(Document) 토글 -->
+        <button
+          type="button"
+          class="field-item all-doc"
+          :class="{ selected: showDocument }"
+          @click="emit('toggle-document')"
+          title="전체 로그(Document) 보기"
+        >
+          <span class="pill">∑</span>
+          <span class="name">모든 필드(전체 로그)</span>
+          <span class="action">{{ showDocument ? '✓' : '+' }}</span>
+        </button>
+
         <div class="field-list">
-          <div v-for="name in filteredFields" :key="name" class="field-item">
+          <button
+            v-for="name in filteredFields"
+            :key="name"
+            type="button"
+            class="field-item"
+            :class="{ selected: isSelected(name) }"
+            @click="onToggle(name)"
+            :title="name"
+          >
             <span class="pill">k</span>
             <span class="name">{{ name }}</span>
-          </div>
+            <span class="action">{{ isSelected(name) ? '✓' : '+' }}</span>
+          </button>
         </div>
       </div>
     </div>
@@ -33,27 +56,26 @@
 <script setup>
 import { computed, ref } from 'vue';
 
-// ❖ 필드 목록: Discover 결과 columns 기반으로 표시, 키워드 필터 지원
 const props = defineProps({
-  fields: {
-    type: Array,
-    default: () => []
-  },
-  open: {
-    type: Boolean,
-    default: true
-  }
+  fields: { type: Array, default: () => [] },
+  selected: { type: Array, default: () => [] },
+  open: { type: Boolean, default: true },
+  showDocument: { type: Boolean, default: true }
 });
 
-defineEmits(['toggle']);
+const emit = defineEmits(['toggle', 'toggle-field', 'toggle-document']);
 
 const keyword = ref('');
 
 const filteredFields = computed(() => {
   const k = keyword.value.trim().toLowerCase();
-  if (!k) return props.fields;
-  return props.fields.filter((f) => f && f.toLowerCase().includes(k));
+  const list = (props.fields || []).filter(Boolean);
+  if (!k) return list;
+  return list.filter((f) => f.toLowerCase().includes(k));
 });
+
+const isSelected = (name) => (props.selected || []).includes(name);
+const onToggle = (name) => emit('toggle-field', name);
 </script>
 
 <style scoped>
@@ -63,12 +85,12 @@ const filteredFields = computed(() => {
   border: 1px solid #1f2937;
   border-radius: 10px;
   padding: 0.65rem;
-  width: 260px;
-  transition: width 0.2s ease, padding 0.2s ease;
+  width: 100%;
+  min-width: 0;
+  transition: padding 0.2s ease;
 }
 
 .field-sidebar.collapsed {
-  width: 64px;
   padding: 0.35rem;
 }
 
@@ -93,6 +115,7 @@ const filteredFields = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  min-height: 0;
 }
 
 .search {
@@ -108,6 +131,7 @@ const filteredFields = computed(() => {
   border: 1px solid #1f2937;
   border-radius: 8px;
   padding: 0.45rem 0.55rem;
+  min-width: 0;
 }
 
 .count {
@@ -133,6 +157,11 @@ const filteredFields = computed(() => {
   flex-direction: column;
   gap: 0.35rem;
   padding-right: 0.15rem;
+  min-height: 0;
+}
+
+.all-doc {
+  margin-bottom: 0.35rem;
 }
 
 .field-item {
@@ -143,6 +172,20 @@ const filteredFields = computed(() => {
   border-radius: 8px;
   background: #0f172a;
   border: 1px solid #1f2937;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+}
+
+.field-item:hover {
+  border-color: #3273dc;
+  color: #bfdbfe;
+  background: #0f172a;
+}
+
+.field-item.selected {
+  border-color: #60a5fa;
+  background: rgba(37, 99, 235, 0.12);
 }
 
 .pill {
@@ -161,6 +204,15 @@ const filteredFields = computed(() => {
 .name {
   color: #e5e7eb;
   font-size: 0.9rem;
-  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.action {
+  color: #94a3b8;
+  font-weight: 800;
 }
 </style>

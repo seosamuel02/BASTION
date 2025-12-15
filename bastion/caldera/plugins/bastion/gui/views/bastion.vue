@@ -1,5 +1,6 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, inject, computed, watch } from "vue";
+import DiscoverPanel from "../components/Discover/DiscoverPanel.vue";
 import { Bar, Line } from 'vue-chartjs';
 import {
   Chart as ChartJS,
@@ -3361,4 +3362,3 @@ section {
   }
 }
 </style>
-

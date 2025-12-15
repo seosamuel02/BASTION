@@ -12,7 +12,7 @@
     <div class="control-bar">
       <IndexSelector
         class="control-item index"
-        :indices="indices"
+        :indices="indexOptions"
         :selected="selectedIndex"
         :disabled="!indices.length"
         @update:selected="handleIndexChange"
@@ -34,9 +34,13 @@
     <div class="discover-body">
       <aside :class="['sidebar', { collapsed: !showSidebar }]">
         <FieldSidebar
-          :fields="results.columns"
+          :fields="availableFields"
+          :selected="visibleColumns"
+          :show-document="showDocument"
           :open="showSidebar"
           @toggle="toggleSidebar"
+          @toggle-field="toggleFieldColumn"
+          @toggle-document="toggleDocument"
         />
         <div v-if="showSidebar" class="sidebar-inner">
           <div class="sidebar-header">
@@ -57,7 +61,7 @@
       </aside>
       <main class="results">
         <ResultTable
-          :results="pagedResults"
+          :results="tableResults"
           :total="totalRows"
           :loading="isSearching"
           :current-index="selectedIndex"
@@ -86,46 +90,39 @@ const $api = inject('$api');
 
 const indices = ref([]);
 const selectedIndex = ref('');
+// ✅ Kibana Discover의 Data View처럼 패턴 옵션을 최상단에 노출
+const indexOptions = computed(() => {
+  const list = indices.value || [];
+  const hasWazuhAlerts = list.some((i) => typeof i === 'string' && i.startsWith('wazuh-alerts-'));
+  const opts = [];
+  if (hasWazuhAlerts) {
+    opts.push({ label: 'wazuh-alerts-*', value: 'wazuh-alerts-*' });
+  }
+  for (const idx of list) {
+    if (!idx) continue;
+    // pattern이 들어가면 중복 제거
+    if (idx === 'wazuh-alerts-*') continue;
+    opts.push({ label: idx, value: idx });
+  }
+  return opts;
+});
 const kql = ref('');
 const timeRange = reactive({
-  from: 'now-24h',
+  // ✅ 초기 기본값: 최근 15분
+  from: 'now-15m',
   to: 'now'
 });
-const fieldFilters = ref([
-  { id: 1, field: 'host.name', operator: 'is', value: 'web-01' },
-  { id: 2, field: 'event.module', operator: 'is', value: 'wazuh' }
-]);
+const fieldFilters = ref([]);
 const showFilters = ref(true);
+const visibleColumns = ref([]);
 
-// 샘플 더미 데이터: 실제 연동 시 searchLogs 반환 형태만 맞추면 됨
-const sampleRows = [
-  {
-    id: '1',
-    '@timestamp': '2024-05-01T10:00:00Z',
-    message: 'Wazuh alert: Suspicious process tree detected',
-    'host.name': 'web-01',
-    'event.module': 'wazuh'
-  },
-  {
-    id: '2',
-    '@timestamp': '2024-05-01T10:05:00Z',
-    message: 'Filebeat: nginx access 200 from 10.0.0.12',
-    'host.name': 'web-02',
-    'event.module': 'filebeat'
-  },
-  {
-    id: '3',
-    '@timestamp': '2024-05-01T10:10:00Z',
-    message: 'Auditbeat: sudo command executed by ubuntu',
-    'host.name': 'jump-host',
-    'event.module': 'auditbeat'
-  }
-];
+// ✅ "모든 필드(전체 로그)"(Document) 기본 ON
+const showDocument = ref(true);
 
 const results = ref({
-  total: sampleRows.length,
-  columns: ['@timestamp', 'message', 'host.name', 'event.module'],
-  rows: sampleRows
+  total: 0,
+  columns: [],
+  rows: []
 });
 const page = ref(1);
 const pageSize = ref(25);
@@ -139,16 +136,68 @@ const totalRows = computed(() => {
   return results.value.rows?.length ?? 0;
 });
 
-const pagedResults = computed(() => {
-  const start = (page.value - 1) * pageSize.value;
-  const end = start + pageSize.value;
-  const rows = results.value.rows || [];
-  return {
-    total: totalRows.value,
-    columns: results.value.columns,
-    rows: rows.slice(start, end)
-  };
+const availableFields = computed(() => {
+  const cols = results.value.columns || [];
+  return [...new Set(cols.filter(Boolean))];
 });
+
+// ✅ Kibana Discover처럼: "@timestamp" + (선택 컬럼) + (Document)
+const tableColumns = computed(() => {
+  const cols = [];
+
+  // 1) 타임스탬프는 가능하면 항상 앞에
+  if (availableFields.value.includes('@timestamp')) {
+    cols.push('@timestamp');
+  }
+
+  // 2) 선택한 필드 컬럼
+  for (const c of visibleColumns.value) {
+    if (!c) continue;
+    if (c === '@timestamp') continue;
+    if (!cols.includes(c)) cols.push(c);
+  }
+
+  // 3) 전체 로그(Document) 컬럼
+  if (showDocument.value) {
+    cols.push('__document__');
+  }
+
+  // fallback: 아무것도 없으면 첫 컬럼
+  if (cols.length === 0 && availableFields.value.length) {
+    cols.push(availableFields.value[0]);
+  }
+  return cols;
+});
+
+const tableResults = computed(() => ({
+  total: totalRows.value,
+  columns: tableColumns.value,
+  rows: results.value.rows || []
+}));
+
+// 필드 클릭 시 컬럼 토글 (최소 1개 유지)
+const toggleFieldColumn = (field) => {
+  if (!availableFields.value.includes(field)) return;
+  const cur = visibleColumns.value.slice();
+  const idx = cur.indexOf(field);
+  if (idx >= 0) cur.splice(idx, 1);
+  else cur.push(field);
+
+  // ✅ Document OFF 상태에서는 최소 1개 컬럼 유지
+  if (!showDocument.value && cur.length === 0 && availableFields.value.length) {
+    cur.push(availableFields.value[0]);
+  }
+  visibleColumns.value = cur;
+};
+
+// ✅ "모든 필드(전체 로그)" 토글
+const toggleDocument = () => {
+  showDocument.value = !showDocument.value;
+  // Document를 끄고 선택된 컬럼이 없다면 최소 1개 보장
+  if (!showDocument.value && visibleColumns.value.length === 0 && availableFields.value.length) {
+    visibleColumns.value = [availableFields.value[0]];
+  }
+};
 
 const isSearching = ref(false);
 const showSidebar = ref(true);
@@ -156,24 +205,34 @@ const showSidebar = ref(true);
 // Elasticsearch Discover 형태의 검색 인터페이스 정의 (프록시 연동)
 async function searchLogs({ index, kql, timeRange, filters }) {
   if (!$api) {
-    console.warn('[Discover] $api 주입 실패, 더미 데이터 사용');
-    return {
-      total: sampleRows.length,
-      columns: ['@timestamp', 'message', 'host.name', 'event.module'],
-      rows: sampleRows
-    };
+    console.warn('[Discover] $api 주입 실패');
+    return { total: 0, columns: [], rows: [] };
   }
 
-  const { data } = await $api.post('/plugin/bastion/es/search', {
-    index,
-    kql,
-    timeRange,
-    filters
-  });
-  return data;
+  try {
+      const { data } = await $api.post('/api/discover/search', {
+        index,
+        from: timeRange.from,
+        to: timeRange.to,
+        query: kql || '*',
+
+        // ✅ 서버 페이징: 프론트에서 rows를 다시 slice 하지 않음
+        size: pageSize.value,
+        offset: (page.value - 1) * pageSize.value
+      });
+      return data;
+    } catch (e) {
+      console.error('[Discover] 검색 실패', e);
+      return { total: 0, columns: [], rows: [] };
+    }
 }
 
-const runSearch = async () => {
+const runSearch = async ({ resetPage = false } = {}) => {
+  if (!selectedIndex.value) {
+    results.value = { total: 0, columns: [], rows: [] };
+    return;
+  }
+  if (resetPage) page.value = 1;
   isSearching.value = true;
   try {
     const data = await searchLogs({
@@ -183,7 +242,10 @@ const runSearch = async () => {
       filters: fieldFilters.value
     });
     results.value = data;
-    page.value = 1;
+    // ✅ Document OFF일 때만 "최소 1개 컬럼" 보장
+    if (!showDocument.value && visibleColumns.value.length === 0 && availableFields.value.length) {
+      visibleColumns.value = [availableFields.value[0]];
+    }
   } finally {
     isSearching.value = false;
   }
@@ -192,10 +254,20 @@ const runSearch = async () => {
 const loadIndices = async () => {
   if (!$api) return;
   try {
-    const { data } = await $api.get('/plugin/bastion/es/indices');
-    indices.value = data || [];
-    if (!selectedIndex.value && indices.value.length > 0) {
-      selectedIndex.value = indices.value[0];
+    const { data } = await $api.get('/api/discover/indices');
+    const list = (data || []).filter(Boolean);
+    // 시스템 인덱스(.)보다 사용자 인덱스를 우선하도록 정렬
+    const userIndices = list.filter((i) => i && !i.startsWith('.'));
+    const systemIndices = list.filter((i) => i && i.startsWith('.'));
+    indices.value = [...userIndices, ...systemIndices];
+
+    // ✅ wazuh-alerts-* (Data View 느낌) 우선 노출/기본 선택
+    const hasWazuhAlerts = indices.value.some((i) => typeof i === 'string' && i.startsWith('wazuh-alerts-'));
+    const defaultIndex = hasWazuhAlerts ? 'wazuh-alerts-*' : (indices.value[0] || '');
+    if (!selectedIndex.value && defaultIndex) selectedIndex.value = defaultIndex;
+
+    if (selectedIndex.value) {
+      await runSearch({ resetPage: true });
     }
   } catch (e) {
     console.error('[Discover] 인덱스 로드 실패', e);
@@ -205,7 +277,7 @@ const loadIndices = async () => {
 // ─ 이벤트 핸들러 (하위 → 상위)
 const handleIndexChange = (value) => {
   selectedIndex.value = value;
-  runSearch();
+  runSearch({ resetPage: true });
 };
 
 const handleKqlChange = (value) => {
@@ -213,12 +285,13 @@ const handleKqlChange = (value) => {
 };
 
 const handleSubmit = () => {
-  runSearch();
+  runSearch({ resetPage: true });
 };
 
 const handleTimeRangeChange = (value) => {
   timeRange.from = value.from;
   timeRange.to = value.to;
+  runSearch({ resetPage: true });
 };
 
 const handleAddFilter = (filter) => {
@@ -249,17 +322,17 @@ const toggleSidebar = () => {
 
 const handlePage = (val) => {
   page.value = val;
+  runSearch({ resetPage: false });
 };
 
 const handlePageSize = (val) => {
   pageSize.value = val;
   page.value = 1;
+  runSearch({ resetPage: false });
 };
 
 onMounted(() => {
-  loadIndices().finally(() => {
-    runSearch();
-  });
+  loadIndices();
 });
 </script>
 
@@ -271,6 +344,10 @@ onMounted(() => {
   padding: 18px;
   color: #e5e7eb;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 .discover-header {
@@ -326,9 +403,10 @@ onMounted(() => {
 }
 
 .discover-body {
-  display: grid;
-  grid-template-columns: minmax(80px, 280px) 1fr;
+  display: flex;
   gap: 1rem;
+  flex: 1;
+  min-height: 0;
 }
 
 .sidebar {
@@ -340,10 +418,13 @@ onMounted(() => {
   flex-direction: column;
   gap: 0.5rem;
   transition: width 0.2s ease;
+  flex: 0 0 320px;
+  min-width: 260px;
+  min-height: 0;
 }
 
 .sidebar.collapsed {
-  width: 80px;
+  flex: 0 0 80px;
   min-width: 80px;
 }
 
@@ -397,6 +478,11 @@ onMounted(() => {
   border-radius: 8px;
   padding: 0.85rem;
   min-height: 360px;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 @media (max-width: 960px) {

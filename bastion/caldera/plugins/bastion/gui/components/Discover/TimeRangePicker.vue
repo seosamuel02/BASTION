@@ -3,7 +3,6 @@
   <div class="time-range-picker">
     <div class="label-row">
       <label class="label">시간 범위</label>
-      <span class="caption">키바나 Quick Select 스타일</span>
     </div>
 
     <div class="trigger-wrap">
@@ -17,17 +16,15 @@
           <input
             class="time-input"
             type="text"
-            :value="timeRange.from"
+            v-model="localFrom"
             placeholder="from 예) now-24h"
-            @input="updateField('from', $event.target.value)"
           >
           <span class="sep">→</span>
           <input
             class="time-input"
             type="text"
-            :value="timeRange.to"
+            v-model="localTo"
             placeholder="to 예) now"
-            @input="updateField('to', $event.target.value)"
           >
         </div>
 
@@ -43,7 +40,7 @@
                 <option value="h">Hours</option>
                 <option value="d">Days</option>
               </select>
-              <button class="apply-btn" @click="applyQuick">Apply</button>
+              <button class="apply-btn" @click="applyQuick">Set</button>
             </div>
           </div>
 
@@ -54,7 +51,7 @@
                 v-for="preset in presetCommon"
                 :key="preset.label"
                 class="chip"
-                @click="setRange(preset.from, preset.to)"
+                @click="setPreset(preset.from, preset.to)"
               >
                 {{ preset.label }}
               </button>
@@ -65,7 +62,7 @@
                 v-for="preset in presetRecent"
                 :key="preset.label"
                 class="chip"
-                @click="setRange(preset.from, preset.to)"
+                @click="setPreset(preset.from, preset.to)"
               >
                 {{ preset.label }}
               </button>
@@ -73,7 +70,12 @@
           </div>
         </div>
         <div class="popover-actions">
-          <button class="ghost" @click="close">닫기</button>
+          <div class="actions-left">
+            <button class="ghost" @click="close">닫기</button>
+          </div>
+          <div class="actions-right">
+            <button class="apply-btn" @click="applyCurrent">적용</button>
+          </div>
         </div>
       </div>
     </div>
@@ -99,6 +101,8 @@ const quick = reactive({
 });
 
 const isOpen = ref(false);
+const localFrom = ref('');
+const localTo = ref('');
 
 const quickNumbers = [1, 5, 10, 15, 30, 60, 90, 120, 180, 360, 720, 1440];
 
@@ -125,26 +129,33 @@ const summary = computed(() => {
   return `${from} → ${to}`;
 });
 
-const updateField = (key, value) => {
-  emit('update:time-range', { ...props.timeRange, [key]: value });
-};
-
-const setRange = (from, to) => {
-  emit('update:time-range', { from, to });
-};
-
 const applyQuick = () => {
   const from = `now-${quick.count}${quick.unit}`;
   const to = 'now';
-  setRange(from, to);
-  isOpen.value = false;
+  localFrom.value = from;
+  localTo.value = to;
 };
 
 const toggleOpen = () => {
+  // 팝오버 열릴 때 현재 state를 로컬로 복사
+  if (!isOpen.value) {
+    localFrom.value = props.timeRange.from || '';
+    localTo.value = props.timeRange.to || '';
+  }
   isOpen.value = !isOpen.value;
 };
 
 const close = () => {
+  isOpen.value = false;
+};
+
+const setPreset = (from, to) => {
+  localFrom.value = from;
+  localTo.value = to;
+};
+
+const applyCurrent = () => {
+  emit('update:time-range', { from: localFrom.value || '', to: localTo.value || '' });
   isOpen.value = false;
 };
 
@@ -360,8 +371,16 @@ onBeforeUnmount(() => {
 
 .popover-actions {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
   margin-top: 0.4rem;
+  gap: 0.5rem;
+}
+
+.actions-left,
+.actions-right {
+  display: flex;
+  gap: 0.4rem;
 }
 
 .ghost {
