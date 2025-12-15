@@ -1,4 +1,4 @@
-<!-- ResultTable.vue: 검색 결과 테이블 + 페이지네이션 -->
+<!-- ResultTable.vue: 검색 결과 테이블 + 페이지네이션 + (Kibana식) Document 요약/팝업 -->
 <template>
   <div class="result-table">
     <div class="table-header">
@@ -17,13 +17,41 @@
       <table>
         <thead>
           <tr>
-            <th v-for="col in results.columns" :key="col">{{ col }}</th>
+            <th class="col-actions" aria-label="actions"></th>
+            <th v-for="col in results.columns" :key="col" :class="colClass(col)">
+              {{ colLabel(col) }}
+            </th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in results.rows" :key="row.id">
-            <td v-for="col in results.columns" :key="col">
-              <span class="mono">{{ formatValue(row[col]) }}</span>
+          <tr v-for="row in results.rows" :key="rowKey(row)">
+            <td class="col-actions">
+              <button
+                type="button"
+                class="icon-btn"
+                title="전체 로그 보기"
+                @click="openDoc(row)"
+              >
+                ⤢
+              </button>
+            </td>
+
+            <td v-for="col in results.columns" :key="col" :class="colClass(col)">
+              <template v-if="col === '__document__'">
+                <div class="doc-summary" :title="docSummaryTitle(row)">
+                  <span
+                    v-for="pair in docSummaryPairs(row)"
+                    :key="pair.k"
+                    class="doc-pair"
+                  >
+                    <span class="doc-k">{{ pair.k }}</span>
+                    <span class="doc-v">{{ pair.v }}</span>
+                  </span>
+                </div>
+              </template>
+              <template v-else>
+                <span class="mono cell" :title="toCellTitle(row?.[col])">{{ formatCell(row?.[col]) }}</span>
+              </template>
             </td>
           </tr>
         </tbody>
@@ -45,65 +73,233 @@
         <button class="nav" :disabled="page >= totalPages" @click="$emit('update:page', page + 1)">›</button>
       </div>
     </div>
+
+    <!-- Document 팝업 -->
+    <div v-if="docOpen" class="modal-backdrop" @click.self="closeDoc">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div class="modal-title">
+            <p class="modal-eyebrow">Document</p>
+            <p class="modal-sub">선택한 로그의 전체 필드/값 보기</p>
+          </div>
+          <button type="button" class="close-btn" @click="closeDoc">✕</button>
+        </div>
+
+        <div class="modal-tabs">
+          <button
+            type="button"
+            class="tab"
+            :class="{ active: docTab === 'table' }"
+            @click="docTab = 'table'"
+          >
+            Table
+          </button>
+          <button
+            type="button"
+            class="tab"
+            :class="{ active: docTab === 'json' }"
+            @click="docTab = 'json'"
+          >
+            JSON
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <div v-if="docTab === 'table'" class="doc-table">
+            <input
+              v-model="docFilter"
+              class="doc-search"
+              type="text"
+              placeholder="Search field names"
+            >
+
+            <div class="doc-grid">
+              <div class="doc-row doc-head">
+                <div class="doc-col field">Field</div>
+                <div class="doc-col value">Value</div>
+              </div>
+
+              <div
+                v-for="pair in filteredDocPairs"
+                :key="pair.k"
+                class="doc-row"
+              >
+                <div class="doc-col field">
+                  <span class="doc-pill">k</span>
+                  <span class="doc-field">{{ pair.k }}</span>
+                </div>
+                <div class="doc-col value">
+                  <span class="doc-value">{{ pair.v }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="doc-json">
+            <pre class="json-pre">{{ docJson }}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 
-// ❖ ResultTable: 결과 테이블 UI, 데이터는 상위에서 주입
 const props = defineProps({
-  results: {
-    type: Object,
-    default: () => ({
-      total: 0,
-      columns: [],
-      rows: []
-    })
-  },
-  loading: {
-    type: Boolean,
-    default: false
-  },
-  currentIndex: {
-    type: String,
-    default: ''
-  },
-  page: {
-    type: Number,
-    default: 1
-  },
-  pageSize: {
-    type: Number,
-    default: 25
-  },
-  pageSizeOptions: {
-    type: Array,
-    default: () => [10, 25, 50, 100]
-  },
-  total: {
-    type: Number,
-    default: 0
-  }
+  results: { type: Object, default: () => ({ total: 0, columns: [], rows: [] }) },
+  loading: { type: Boolean, default: false },
+  currentIndex: { type: String, default: '' },
+  page: { type: Number, default: 1 },
+  pageSize: { type: Number, default: 25 },
+  pageSizeOptions: { type: Array, default: () => [10, 25, 50, 100] },
+  total: { type: Number, default: 0 }
 });
 
 const emit = defineEmits(['update:page', 'update:page-size']);
 
-const formatValue = (value) => {
-  if (value === undefined || value === null || value === '') return '—';
-  return value;
-};
-
+// 페이징
 const totalPages = computed(() => {
   if (props.total === 0 || !props.pageSize) return 1;
   return Math.max(1, Math.ceil(props.total / props.pageSize));
 });
-
 const onPageSize = (val) => {
   const num = Number(val) || props.pageSize;
   emit('update:page-size', num);
-  emit('update:page', 1); // 페이지 리셋
+  emit('update:page', 1);
 };
+
+// Document 팝업
+const docOpen = ref(false);
+const docRow = ref(null);
+const docTab = ref('table');
+const docFilter = ref('');
+
+const openDoc = (row) => {
+  docRow.value = row || null;
+  docTab.value = 'table';
+  docFilter.value = '';
+  docOpen.value = true;
+};
+const closeDoc = () => { docOpen.value = false; };
+const onKeyDown = (e) => { if (e.key === 'Escape' && docOpen.value) closeDoc(); };
+onMounted(() => window.addEventListener('keydown', onKeyDown));
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown));
+
+const isPlainObject = (v) => Object.prototype.toString.call(v) === '[object Object]';
+
+// row를 dot-path로 펼침
+const flattenRow = (obj, { maxDepth = 4, maxPairs = 600 } = {}) => {
+  const out = [];
+  const walk = (cur, prefix, depth) => {
+    if (out.length >= maxPairs) return;
+    if (cur === null || cur === undefined) {
+      out.push({ k: prefix || '(root)', v: '—' });
+      return;
+    }
+    if (depth >= maxDepth || typeof cur !== 'object') {
+      out.push({ k: prefix || '(root)', v: toDisplay(cur) });
+      return;
+    }
+    if (Array.isArray(cur)) {
+      out.push({ k: prefix || '(root)', v: toDisplay(cur) });
+      return;
+    }
+    if (isPlainObject(cur)) {
+      const keys = Object.keys(cur);
+      if (keys.length === 0) {
+        out.push({ k: prefix || '(root)', v: '{}' });
+        return;
+      }
+      for (const key of keys) {
+        if (out.length >= maxPairs) break;
+        const next = cur[key];
+        const nextPrefix = prefix ? `${prefix}.${key}` : key;
+        if (next !== null && typeof next === 'object' && isPlainObject(next)) {
+          walk(next, nextPrefix, depth + 1);
+        } else if (Array.isArray(next)) {
+          out.push({ k: nextPrefix, v: toDisplay(next) });
+        } else {
+          out.push({ k: nextPrefix, v: toDisplay(next) });
+        }
+      }
+      return;
+    }
+    out.push({ k: prefix || '(root)', v: toDisplay(cur) });
+  };
+  walk(obj, '', 0);
+  const weight = (k) => {
+    const top = String(k || '');
+    if (top === '@timestamp') return 0;
+    if (top === '_id') return 1;
+    if (top === '_index') return 2;
+    if (top === '_score') return 3;
+    return 10;
+  };
+  return out
+    .filter((p) => p && p.k)
+    .sort((a, b) => {
+      const wa = weight(a.k);
+      const wb = weight(b.k);
+      if (wa !== wb) return wa - wb;
+      return a.k.localeCompare(b.k);
+    });
+};
+
+const toDisplay = (value) => {
+  if (value === undefined || value === null || value === '') return '—';
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
+};
+const toSingleLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+const truncate = (s, maxLen) => {
+  const str = String(s ?? '');
+  return str.length <= maxLen ? str : str.slice(0, maxLen) + '…';
+};
+
+// Document 요약
+const docSummaryPairs = (row) => {
+  const pairs = flattenRow(row, { maxDepth: 4, maxPairs: 300 });
+  return pairs.slice(0, 24).map((p) => ({
+    k: p.k,
+    v: truncate(toSingleLine(p.v), 80)
+  }));
+};
+const docSummaryTitle = (row) => {
+  const pairs = flattenRow(row, { maxDepth: 4, maxPairs: 120 }).slice(0, 60);
+  return pairs.map((p) => `${p.k}: ${truncate(toSingleLine(p.v), 120)}`).join(' · ');
+};
+
+const formatCell = (value) => truncate(toSingleLine(toDisplay(value)), 160);
+const toCellTitle = (value) => {
+  const v = toSingleLine(toDisplay(value));
+  return v.length > 0 ? v : '—';
+};
+
+const filteredDocPairs = computed(() => {
+  const row = docRow.value;
+  if (!row) return [];
+  const q = docFilter.value.trim().toLowerCase();
+  const pairs = flattenRow(row, { maxDepth: 6, maxPairs: 800 });
+  if (!q) return pairs;
+  return pairs.filter((p) => {
+    const k = (p.k || '').toLowerCase();
+    const v = (p.v || '').toLowerCase();
+    return k.includes(q) || v.includes(q);
+  });
+});
+
+const docJson = computed(() => {
+  if (!docRow.value) return '';
+  try { return JSON.stringify(docRow.value, null, 2); }
+  catch { return String(docRow.value); }
+});
+
+// UI helper
+const rowKey = (row) => row?.id || row?._id || row?._source_id || `${row?.['@timestamp'] ?? ''}-${row?._index ?? ''}-${row?.message ?? ''}`;
+const colLabel = (col) => (col === '__document__' ? 'Document' : col);
+const colClass = (col) => (col === '__document__' ? 'col-doc' : '');
 </script>
 
 <style scoped>
@@ -111,6 +307,8 @@ const onPageSize = (val) => {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  flex: 1;
+  min-height: 0;
 }
 
 .table-header {
@@ -119,22 +317,9 @@ const onPageSize = (val) => {
   justify-content: space-between;
 }
 
-.label {
-  color: #cbd5e1;
-  font-weight: 600;
-  margin: 0;
-}
-
-.hint {
-  color: #94a3b8;
-  font-size: 0.85rem;
-  margin: 0.1rem 0 0;
-}
-
-.loading {
-  color: #bfdbfe;
-  font-size: 0.9rem;
-}
+.label { color: #cbd5e1; font-weight: 600; margin: 0; }
+.hint { color: #94a3b8; font-size: 0.85rem; margin: 0.1rem 0 0; }
+.loading { color: #bfdbfe; font-size: 0.9rem; }
 
 .empty {
   padding: 0.85rem;
@@ -146,48 +331,142 @@ const onPageSize = (val) => {
 }
 
 .table-wrapper {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   border: 1px solid #1f2937;
   border-radius: 8px;
   background: #0b1221;
 }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-}
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+thead tr { background: #0f172a; }
 
-thead tr {
-  background: #0f172a;
-}
-
-th,
-td {
+th, td {
   border-bottom: 1px solid #1f2937;
-  padding: 0.6rem 0.75rem;
+  padding: 0.55rem 0.75rem;
   text-align: left;
   color: #e5e7eb;
+  vertical-align: top;
 }
 
-th {
+th { color: #cbd5e1; font-weight: 600; white-space: nowrap; }
+tbody tr:nth-child(even) { background: #111827; }
+tbody tr:hover { background: rgba(37, 99, 235, 0.08); }
+
+.col-actions { width: 44px; padding-left: 0.5rem; padding-right: 0.5rem; }
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid #1f2937;
   color: #cbd5e1;
-  font-weight: 600;
-  white-space: nowrap;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
 }
+.icon-btn:hover { border-color: #3273dc; color: #bfdbfe; }
 
-tbody tr:nth-child(even) {
+.mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+.cell { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+.col-doc { min-width: 360px; }
+.doc-summary { height: 74px; overflow: hidden; display: block; line-height: 1.25; }
+.doc-pair { display: inline; margin-right: 0.65rem; white-space: normal; }
+.doc-k { color: #e5e7eb; font-weight: 700; margin-right: 0.25rem; }
+.doc-v { color: #cbd5e1; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 9999;
+}
+.modal {
+  width: 900px;
+  max-width: 95vw;
+  max-height: 88vh;
+  background: #0b1221;
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 0.85rem;
+  border-bottom: 1px solid #1f2937;
+  background: #0f172a;
+}
+.modal-title { display: flex; flex-direction: column; gap: 0.1rem; }
+.modal-eyebrow { margin: 0; color: #cbd5e1; font-weight: 800; }
+.modal-sub { margin: 0; color: #94a3b8; font-size: 0.85rem; }
+.close-btn {
+  background: transparent;
+  border: 1px solid #1f2937;
+  color: #e5e7eb;
+  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+}
+.close-btn:hover { border-color: #3273dc; color: #bfdbfe; }
+
+.modal-tabs { display: flex; gap: 0.35rem; padding: 0.6rem 0.85rem; border-bottom: 1px solid #1f2937; }
+.tab {
   background: #111827;
+  border: 1px solid #1f2937;
+  color: #cbd5e1;
+  border-radius: 10px;
+  padding: 0.35rem 0.65rem;
+  cursor: pointer;
 }
+.tab.active { border-color: #60a5fa; color: #bfdbfe; background: rgba(37, 99, 235, 0.12); }
 
-tbody tr:hover {
-  background: rgba(37, 99, 235, 0.08);
+.modal-body { padding: 0.75rem 0.85rem; overflow: auto; }
+.doc-search {
+  width: 100%;
+  background: #0f172a;
+  color: #e5e7eb;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  margin-bottom: 0.65rem;
 }
-
-.mono {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  white-space: nowrap;
+.doc-grid { border: 1px solid #1f2937; border-radius: 12px; overflow: hidden; }
+.doc-row { display: grid; grid-template-columns: 320px 1fr; gap: 0; border-bottom: 1px solid #1f2937; }
+.doc-row:last-child { border-bottom: none; }
+.doc-row.doc-head { background: #0f172a; font-weight: 800; color: #cbd5e1; }
+.doc-col { padding: 0.55rem 0.65rem; min-width: 0; }
+.doc-col.value { border-left: 1px solid #1f2937; }
+.doc-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: #1f2937;
+  color: #cbd5e1;
+  font-size: 0.75rem;
+  font-weight: 800;
+  margin-right: 0.45rem;
 }
+.doc-field { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: #e5e7eb; }
+.doc-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+.json-pre { background: #0f172a; border: 1px solid #1f2937; border-radius: 12px; padding: 0.75rem; color: #cbd5e1; overflow: auto; }
 
 .pager {
   display: flex;
@@ -198,7 +477,6 @@ tbody tr:hover {
   color: #cbd5e1;
   font-size: 0.9rem;
 }
-
 .page-size select {
   margin-left: 0.4rem;
   background: #0b1221;
@@ -207,13 +485,7 @@ tbody tr:hover {
   border-radius: 8px;
   padding: 0.35rem 0.5rem;
 }
-
-.page-info {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-}
-
+.page-info { display: flex; align-items: center; gap: 0.45rem; }
 .nav {
   background: #111827;
   border: 1px solid #1f2937;
@@ -222,9 +494,10 @@ tbody tr:hover {
   padding: 0.35rem 0.55rem;
   cursor: pointer;
 }
+.nav:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.nav:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+@media (max-width: 820px) {
+  .doc-row { grid-template-columns: 1fr; }
+  .doc-col.value { border-left: none; border-top: 1px solid #1f2937; }
 }
 </style>

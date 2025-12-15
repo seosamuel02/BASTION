@@ -1,5 +1,6 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, inject, computed, watch } from "vue";
+import DiscoverPanel from "../components/Discover/DiscoverPanel.vue";
 import { Bar, Line } from 'vue-chartjs';
 import {
   Chart as ChartJS,
@@ -1411,6 +1412,18 @@ const timelineChartOptions = {
             </div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- Discover (UI 프리뷰) -->
+    <section class="discover-section">
+      <div class="section-header">
+        <span class="section-icon">[D]</span>
+        <h2 class="section-title">DISCOVER (UI PREVIEW)</h2>
+      </div>
+      <div class="discover-wrapper">
+        <p class="discover-desc">Kibana Discover 구조를 Bastion에 분리된 컴포넌트로 구현한 화면입니다.</p>
+        <DiscoverPanel />
       </div>
     </section>
 
@@ -2998,4 +3011,3 @@ section {
   }
 }
 </style>
-

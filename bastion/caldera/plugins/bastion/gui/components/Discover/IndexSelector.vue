@@ -12,12 +12,15 @@
     </div>
     <div v-if="isOpen && !disabled" class="dropdown">
       <button
-        v-for="idx in indices"
-        :key="idx"
+        v-for="opt in normalized"
+        :key="opt.value"
         class="dropdown-item"
-        @click="selectIndex(idx)"
+        :class="{ selected: opt.value === props.selected }"
+        @click="selectIndex(opt.value)"
+        :title="opt.value"
       >
-        {{ idx }}
+        <span class="check">{{ opt.value === props.selected ? '✓' : '' }}</span>
+        <span class="label-text">{{ opt.label }}</span>
       </button>
     </div>
   </div>
@@ -49,6 +52,23 @@ const displayValue = computed(() => {
   if (props.selected) return props.selected;
   if (!props.indices.length) return '인덱스 없음';
   return '선택 없음';
+});
+
+// ✅ indices를 문자열 배열 / {label,value} 배열 모두 지원
+const normalized = computed(() => {
+  const list = props.indices || [];
+  return list
+    .map((x) => {
+      if (typeof x === 'string') return { label: x, value: x };
+      if (x && typeof x === 'object') {
+        const value = x.value ?? x.label;
+        const label = x.label ?? x.value;
+        if (!value) return null;
+        return { label: String(label), value: String(value) };
+      }
+      return null;
+    })
+    .filter(Boolean);
 });
 
 const toggle = () => {
@@ -143,6 +163,31 @@ onBeforeUnmount(() => {
   border: none;
   color: #e5e7eb;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.check {
+  width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #93c5fd;
+  font-weight: 800;
+}
+
+.label-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-item.selected {
+  background: rgba(37, 99, 235, 0.12);
+  color: #bfdbfe;
 }
 
 .dropdown-item:hover {
