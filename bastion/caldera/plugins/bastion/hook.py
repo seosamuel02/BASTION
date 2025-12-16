@@ -1,6 +1,6 @@
 """
 BASTION (Bridging Attack Simulations To Integrated Observability Network)
-Caldera와 Wazuh SIEM을 통합하여 공격 시뮬레이션과 탐지 검증을 자동화
+Integrates Caldera with Wazuh SIEM to automate attack simulations and detection validation.
 """
 
 from aiohttp import web
@@ -8,22 +8,22 @@ import logging
 
 name = 'bastion'
 description = 'BASTION - Bridging Attack Simulations To Integrated Observability Network'
-address = None  # Vue 자동 라우팅 사용 (/plugins/bastion)
+address = None  # Vue handles routing (/plugins/bastion)
 
 async def enable(services):
     """
-    플러그인 초기화 함수
+    Initialize plugin.
 
     Args:
-        services: Caldera 코어 서비스 딕셔너리
+        services: Caldera core services dictionary
     """
     app_svc = services.get('app_svc')
     log = app_svc.log if app_svc else logging.getLogger('bastion')
 
-    log.info('[BASTION] BASTION Plugin 초기화 시작')
+    log.info('[BASTION] BASTION plugin initialization start')
 
     try:
-        # 설정 로드 - 환경 변수 우선, 그 다음 local.yml
+        # Load configuration - prefer environment variables, then local.yml
         import os
 
         bastion_config = app_svc.get_config().get('bastion', {}) if app_svc else {}
@@ -36,7 +36,7 @@ async def enable(services):
             'wazuh_password': os.getenv('WAZUH_PASSWORD') or wazuh_config.get('manager_password', 'wazuh'),
             'indexer_username': os.getenv('WAZUH_INDEXER_USERNAME') or wazuh_config.get('indexer_username', 'admin'),
             'indexer_password': os.getenv('WAZUH_INDEXER_PASSWORD') or wazuh_config.get('indexer_password', 'SecretPassword'),
-            # Discover 전용 Elasticsearch 접속 정보 (Wazuh Manager 재사용 금지)
+            # Dedicated Elasticsearch connection for Discover (do not reuse Wazuh Manager credentials)
             'elastic_url': os.getenv('ELASTIC_URL') or 'http://elasticsearch:9200',
             'elastic_username': os.getenv('ELASTIC_USERNAME') or 'elastic',
             'elastic_password': os.getenv('ELASTIC_PASSWORD') or 'changeme',
@@ -46,63 +46,63 @@ async def enable(services):
 
         log.info(f'[BASTION] Wazuh Manager URL: {config["wazuh_manager_url"]}')
 
-        # BASTION 서비스 초기화
+        # Initialize BASTION service
         from plugins.bastion.app.bastion_service import BASTIONService
         bastion_svc = BASTIONService(services, config)
 
-        # REST API 엔드포인트 등록
+        # Register REST API endpoints
         app = app_svc.application
 
-        # 알림 조회 엔드포인트
+        # Alerts endpoint
         app.router.add_route('GET', '/plugin/bastion/alerts',
                             bastion_svc.get_recent_alerts)
 
-        # 상관관계 분석 엔드포인트
+        # Correlation analysis endpoint
         app.router.add_route('POST', '/plugin/bastion/correlate',
                             bastion_svc.correlate_operation)
 
-        # 탐지 리포트 생성
+        # Detection report
         app.router.add_route('GET', '/plugin/bastion/detection_report',
                             bastion_svc.generate_detection_report)
 
-        # 적응형 작전 생성
+        # Adaptive operation creation
         app.router.add_route('POST', '/plugin/bastion/adaptive_operation',
                             bastion_svc.create_adaptive_operation)
 
-        # 헬스체크 엔드포인트
+        # Health check endpoint
         app.router.add_route('GET', '/plugin/bastion/health',
                             bastion_svc.health_check)
 
-        # Agent 조회 엔드포인트
+        # Agent lookup endpoint
         app.router.add_route('GET', '/plugin/bastion/agents',
                             bastion_svc.get_agents_with_detections)
 
-        # 대시보드 통합 데이터 엔드포인트
+        # Dashboard summary endpoint
         app.router.add_route('GET', '/plugin/bastion/dashboard',
                             bastion_svc.get_dashboard_summary)
 
-        # Tier 2: MITRE ATT&CK Technique 커버리지 분석
+        # Tier 2: MITRE ATT&CK Technique coverage analysis
         app.router.add_route('GET', '/plugin/bastion/dashboard/techniques',
                             bastion_svc.get_technique_coverage)
 
-        # Elasticsearch Discover 프록시 (인덱스/검색)
+        # Elasticsearch Discover proxy (indices/search)
         app.router.add_route('GET', '/plugin/bastion/es/indices',
                             bastion_svc.get_es_indices)
         app.router.add_route('POST', '/plugin/bastion/es/search',
                             bastion_svc.search_es)
-        # Discover (MVP) 전용 API
+        # Discover (MVP) dedicated API
         app.router.add_route('GET', '/api/discover/indices',
                             bastion_svc.get_discover_indices)
         app.router.add_route('POST', '/api/discover/search',
                             bastion_svc.discover_search)
 
-        # 정적 파일 제공 (CSS, JS, 이미지) - 현재 미사용
+        # Static file serving (CSS, JS, images) - currently unused
         # app.router.add_static('/bastion/static',
         #                      'plugins/bastion/static/',
         #                      append_version=True)
 
-        log.info('[BASTION] REST API 엔드포인트 등록 완료')
-        log.info('[BASTION] 사용 가능한 엔드포인트:')
+        log.info('[BASTION] REST API endpoint registration complete')
+        log.info('[BASTION] Available endpoints:')
         log.info('  - GET  /plugin/bastion/alerts')
         log.info('  - POST /plugin/bastion/correlate')
         log.info('  - GET  /plugin/bastion/detection_report')
@@ -117,40 +117,40 @@ async def enable(services):
         log.info('  - POST /api/discover/search  (NEW - Discover MVP)')
         log.info(f'  - GUI: http://localhost:8888{address}')
 
-        # Wazuh 인증을 백그라운드 태스크로 시작
+        # Start Wazuh authentication in background
         import asyncio
 
         async def authenticate_wazuh():
             try:
                 await bastion_svc.authenticate()
-                log.info('[BASTION] Wazuh API 인증 성공')
+                log.info('[BASTION] Wazuh API authentication succeeded')
             except Exception as auth_error:
-                log.warning(f'[BASTION] Wazuh API 인증 실패: {auth_error}')
-                log.warning('[BASTION] Wazuh 서버가 실행 중인지 확인하세요')
+                log.warning(f'[BASTION] Wazuh API authentication failed: {auth_error}')
+                log.warning('[BASTION] Verify that the Wazuh server is running')
 
         asyncio.create_task(authenticate_wazuh())
-        log.info('[BASTION] Wazuh 인증을 백그라운드에서 시작합니다')
+        log.info('[BASTION] Wazuh authentication started in background')
 
-        # 백그라운드 모니터링 시작 (선택사항)
+        # Optional: start continuous monitoring
         if config.get('enable_continuous_monitoring', False):
             asyncio.create_task(bastion_svc.continuous_monitoring())
-            log.info('[BASTION] 지속적 모니터링 시작됨')
+            log.info('[BASTION] Continuous monitoring started')
 
-        log.info('[BASTION] 플러그인 활성화 완료 ✓')
+        log.info('[BASTION] Plugin enable complete ✓')
 
     except ImportError as e:
-        log.error(f'[BASTION] 모듈 임포트 실패: {e}')
-        log.error('[BASTION] plugins/bastion/app/bastion_service.py 파일이 있는지 확인하세요')
+        log.error(f'[BASTION] Module import failed: {e}')
+        log.error('[BASTION] Ensure plugins/bastion/app/bastion_service.py exists')
         raise
     except Exception as e:
-        log.error(f'[BASTION] 플러그인 활성화 실패: {e}', exc_info=True)
+        log.error(f'[BASTION] Plugin enable failed: {e}', exc_info=True)
         raise
 
 
 async def expansion(services):
     """
-    플러그인 확장 함수 (선택사항)
-    모든 플러그인 로딩 후 호출됨
+    Optional plugin expansion hook.
+    Called after all plugins are loaded.
     """
     log = services.get('app_svc').log
-    log.debug('[BASTION] Expansion hook 호출됨')
+    log.debug('[BASTION] Expansion hook invoked')

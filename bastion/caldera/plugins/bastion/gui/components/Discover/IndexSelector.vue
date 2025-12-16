@@ -1,7 +1,7 @@
-<!-- IndexSelector.vue: 인덱스 선택 토글 드롭다운 (키바나 Data View 느낌) -->
+<!-- IndexSelector.vue: Index dropdown selector -->
 <template>
   <div class="index-selector">
-    <label class="label">Index</label>
+    <label class="label">INDEX</label>
     <div
       class="trigger"
       :class="{ disabled }"
@@ -29,7 +29,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
 
-// ❖ IndexSelector: 인덱스 목록을 토글 드롭다운으로 표시, 선택 시 상위로 emit
+// IndexSelector: displays indices as dropdown and emits selection
 const props = defineProps({
   indices: {
     type: Array,
@@ -50,11 +50,10 @@ const isOpen = ref(false);
 
 const displayValue = computed(() => {
   if (props.selected) return props.selected;
-  if (!props.indices.length) return '인덱스 없음';
-  return '선택 없음';
+  if (!props.indices.length) return 'No indices';
+  return 'Select index';
 });
 
-// ✅ indices를 문자열 배열 / {label,value} 배열 모두 지원
 const normalized = computed(() => {
   const list = props.indices || [];
   return list
@@ -121,6 +120,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
 .trigger.disabled {
@@ -129,7 +129,8 @@ onBeforeUnmount(() => {
 }
 
 .trigger:hover {
-  border-color: #3273dc;
+  border-color: var(--cyber-green, #00ff88);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
 }
 
 .chevron {
@@ -153,6 +154,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
   z-index: 10;
   overflow: hidden;
+  backdrop-filter: blur(4px);
 }
 
 .dropdown-item {

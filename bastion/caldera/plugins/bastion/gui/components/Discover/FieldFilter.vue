@@ -1,16 +1,16 @@
-<!-- FieldFilter.vue: 필드 필터 목록을 표시·추가·수정·삭제 -->
+<!-- FieldFilter.vue: Field filters list with add/update/remove -->
 <template>
   <div class="field-filter">
     <div class="heading-row">
       <div>
-        <p class="label">필드 필터</p>
-        <p class="hint">필터 추가/수정은 상위 state로 emit</p>
+        <p class="label">Field filters</p>
+        <p class="hint">Add, edit, and remove filters; emits to parent</p>
       </div>
       <span class="badge">{{ filters.length }}</span>
     </div>
 
     <div v-if="filters.length === 0" class="empty">
-      아직 추가된 필터가 없습니다.
+      No filters added yet.
     </div>
     <div v-else class="filter-list">
       <div
@@ -22,7 +22,7 @@
           class="input"
           type="text"
           :value="filter.field"
-          placeholder="field 예) host.name"
+          placeholder="Field e.g. host.name"
           @input="update(filter.id, 'field', $event.target.value)"
         >
         <select
@@ -38,10 +38,10 @@
           class="input"
           type="text"
           :value="filter.value"
-          placeholder="value"
+          placeholder="Value"
           @input="update(filter.id, 'value', $event.target.value)"
         >
-        <button class="ghost-btn" @click="remove(filter.id)">삭제</button>
+        <button class="ghost-btn" @click="remove(filter.id)">Remove</button>
       </div>
     </div>
 
@@ -50,7 +50,7 @@
         class="input"
         type="text"
         v-model="newFilter.field"
-        placeholder="새 필터 field"
+        placeholder="New filter field"
       >
       <select class="select" v-model="newFilter.operator">
         <option value="is">is</option>
@@ -61,9 +61,9 @@
         class="input"
         type="text"
         v-model="newFilter.value"
-        placeholder="value"
+        placeholder="Value"
       >
-      <button class="add-btn" @click="add">추가</button>
+      <button class="add-btn" @click="add">Add</button>
     </div>
   </div>
 </template>
@@ -71,7 +71,7 @@
 <script setup>
 import { reactive } from 'vue';
 
-// ❖ FieldFilter: 리스트를 표시하고 수정/삭제/추가 이벤트를 emit
+// FieldFilter: renders list and emits add/update/remove events
 const props = defineProps({
   filters: {
     type: Array,
@@ -112,6 +112,7 @@ const add = () => {
   flex-direction: column;
   gap: 0.5rem;
   height: 100%;
+  color: var(--text-primary, #e0e6ed);
 }
 
 .heading-row {
@@ -145,7 +146,7 @@ const add = () => {
   padding: 0.75rem;
   background: #0b1221;
   border: 1px dashed #1f2937;
-  border-radius: 6px;
+  border-radius: 8px;
   color: #94a3b8;
   font-size: 0.9rem;
 }
@@ -165,13 +166,14 @@ const add = () => {
 
 .input,
 .select {
-  background: #0b1221;
+  background: #0f1419;
   color: #e5e7eb;
   border: 1px solid #1f2937;
   border-radius: 8px;
-  padding: 0.5rem 0.65rem;
+  padding: 0.55rem 0.7rem;
   font-size: 0.9rem;
   min-height: 40px;
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
 .new-filter {
@@ -191,24 +193,31 @@ const add = () => {
   border-radius: 8px;
   cursor: pointer;
   min-height: 40px;
+  transition: all 0.15s ease;
 }
 
 .add-btn {
-  background: linear-gradient(135deg, #3273dc, #285bb5);
-  color: #e5e7eb;
-  border: 1px solid #285bb5;
-  padding: 0.5rem 0.9rem;
+  background: linear-gradient(135deg, var(--cyber-green, #00ff88), #00b46b);
+  color: #0a0e12;
+  border: 1px solid #00b46b;
+  padding: 0.55rem 0.9rem;
   border-radius: 8px;
   cursor: pointer;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 6px 18px rgba(0, 255, 136, 0.25);
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
 }
 
 .add-btn:hover {
   filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(0, 255, 136, 0.3);
 }
 
 .ghost-btn:hover {
   border-color: #f87171;
+  box-shadow: 0 6px 18px rgba(248, 113, 113, 0.15);
 }
 
 @media (max-width: 640px) {

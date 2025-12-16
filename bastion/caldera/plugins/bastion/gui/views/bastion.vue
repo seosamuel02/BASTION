@@ -1422,7 +1422,6 @@ const timelineChartOptions = {
         <h2 class="section-title">DISCOVER (UI PREVIEW)</h2>
       </div>
       <div class="discover-wrapper">
-        <p class="discover-desc">Kibana Discover 구조를 Bastion에 분리된 컴포넌트로 구현한 화면입니다.</p>
         <DiscoverPanel />
       </div>
     </section>
