@@ -1,16 +1,16 @@
-<!-- ResultTable.vue: 검색 결과 테이블 + 페이지네이션 + (Kibana식) Document 요약/팝업 -->
+<!-- ResultTable.vue: Results table with pagination and document modal -->
 <template>
   <div class="result-table">
     <div class="table-header">
       <div>
-        <p class="label">결과</p>
-        <p class="hint">Index: {{ currentIndex || '-' }} · 총 {{ total }}건</p>
+        <p class="label">Results</p>
+        <p class="hint">Index: {{ currentIndex || '-' }} · Total {{ total }}</p>
       </div>
-      <span v-if="loading" class="loading">검색 중...</span>
+      <span v-if="loading" class="loading">Searching...</span>
     </div>
 
     <div v-if="!results.rows || results.rows.length === 0" class="empty">
-      검색 결과가 없습니다. 조건을 변경해 보세요.
+      No results found. Try adjusting the query.
     </div>
 
     <div v-else class="table-wrapper">
@@ -29,7 +29,7 @@
               <button
                 type="button"
                 class="icon-btn"
-                title="전체 로그 보기"
+                title="View full document"
                 @click="openDoc(row)"
               >
                 ⤢
@@ -74,13 +74,13 @@
       </div>
     </div>
 
-    <!-- Document 팝업 -->
+    <!-- Document modal -->
     <div v-if="docOpen" class="modal-backdrop" @click.self="closeDoc">
       <div class="modal" role="dialog" aria-modal="true">
         <div class="modal-head">
           <div class="modal-title">
             <p class="modal-eyebrow">Document</p>
-            <p class="modal-sub">선택한 로그의 전체 필드/값 보기</p>
+            <p class="modal-sub">Full field/value view of the selected log</p>
           </div>
           <button type="button" class="close-btn" @click="closeDoc">✕</button>
         </div>
@@ -159,7 +159,7 @@ const props = defineProps({
 
 const emit = defineEmits(['update:page', 'update:page-size']);
 
-// 페이징
+// Pagination
 const totalPages = computed(() => {
   if (props.total === 0 || !props.pageSize) return 1;
   return Math.max(1, Math.ceil(props.total / props.pageSize));
@@ -170,7 +170,7 @@ const onPageSize = (val) => {
   emit('update:page', 1);
 };
 
-// Document 팝업
+// Document modal
 const docOpen = ref(false);
 const docRow = ref(null);
 const docTab = ref('table');
@@ -189,7 +189,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown));
 
 const isPlainObject = (v) => Object.prototype.toString.call(v) === '[object Object]';
 
-// row를 dot-path로 펼침
+// Flatten row into dot notation pairs
 const flattenRow = (obj, { maxDepth = 4, maxPairs = 600 } = {}) => {
   const out = [];
   const walk = (cur, prefix, depth) => {
@@ -258,7 +258,7 @@ const truncate = (s, maxLen) => {
   return str.length <= maxLen ? str : str.slice(0, maxLen) + '…';
 };
 
-// Document 요약
+// Document summary
 const docSummaryPairs = (row) => {
   const pairs = flattenRow(row, { maxDepth: 4, maxPairs: 300 });
   return pairs.slice(0, 24).map((p) => ({
@@ -304,11 +304,19 @@ const colClass = (col) => (col === '__document__' ? 'col-doc' : '');
 
 <style scoped>
 .result-table {
+  --border: var(--border-color, #2a3a4a);
+  --bg: var(--bg-primary, #0f1419);
+  --panel: var(--bg-card, #1a222d);
+  --muted: var(--text-muted, #5a6a7a);
+  --text: var(--text-primary, #e0e6ed);
+  --accent: var(--cyber-green, #00ff88);
+  --accent-soft: var(--cyber-green-dim, rgba(0, 255, 136, 0.16));
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
   flex: 1;
   min-height: 0;
+  color: var(--text);
 }
 
 .table-header {
@@ -317,42 +325,43 @@ const colClass = (col) => (col === '__document__' ? 'col-doc' : '');
   justify-content: space-between;
 }
 
-.label { color: #cbd5e1; font-weight: 600; margin: 0; }
-.hint { color: #94a3b8; font-size: 0.85rem; margin: 0.1rem 0 0; }
-.loading { color: #bfdbfe; font-size: 0.9rem; }
+.label { color: var(--text); font-weight: 700; margin: 0; letter-spacing: 0.05em; }
+.hint { color: var(--muted); font-size: 0.85rem; margin: 0.1rem 0 0; }
+.loading { color: var(--accent); font-size: 0.9rem; letter-spacing: 0.04em; }
 
 .empty {
   padding: 0.85rem;
-  background: #0b1221;
-  border: 1px dashed #1f2937;
-  border-radius: 6px;
-  color: #94a3b8;
-  font-size: 0.9rem;
+  background: rgba(0, 255, 136, 0.03);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 0.92rem;
 }
 
 .table-wrapper {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  border: 1px solid #1f2937;
-  border-radius: 8px;
-  background: #0b1221;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(0, 255, 136, 0.03), rgba(0, 0, 0, 0.08)) var(--bg);
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-thead tr { background: #0f172a; }
+thead tr { background: rgba(0, 255, 136, 0.05); }
 
 th, td {
-  border-bottom: 1px solid #1f2937;
+  border-bottom: 1px solid var(--border);
   padding: 0.55rem 0.75rem;
   text-align: left;
-  color: #e5e7eb;
+  color: var(--text);
   vertical-align: top;
 }
 
-th { color: #cbd5e1; font-weight: 600; white-space: nowrap; }
-tbody tr:nth-child(even) { background: #111827; }
-tbody tr:hover { background: rgba(37, 99, 235, 0.08); }
+th { color: var(--text); font-weight: 700; white-space: nowrap; letter-spacing: 0.03em; }
+tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.02); }
+tbody tr:hover { background: rgba(0, 255, 136, 0.05); }
 
 .col-actions { width: 44px; padding-left: 0.5rem; padding-right: 0.5rem; }
 
@@ -363,13 +372,14 @@ tbody tr:hover { background: rgba(37, 99, 235, 0.08); }
   align-items: center;
   justify-content: center;
   background: transparent;
-  border: 1px solid #1f2937;
-  color: #cbd5e1;
+  border: 1px solid var(--border);
+  color: var(--text);
   border-radius: 8px;
   cursor: pointer;
   font-size: 0.9rem;
+  transition: all 0.15s ease;
 }
-.icon-btn:hover { border-color: #3273dc; color: #bfdbfe; }
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 12px rgba(0, 255, 136, 0.25); }
 
 .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
 .cell { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
@@ -377,8 +387,8 @@ tbody tr:hover { background: rgba(37, 99, 235, 0.08); }
 .col-doc { min-width: 360px; }
 .doc-summary { height: 74px; overflow: hidden; display: block; line-height: 1.25; }
 .doc-pair { display: inline; margin-right: 0.65rem; white-space: normal; }
-.doc-k { color: #e5e7eb; font-weight: 700; margin-right: 0.25rem; }
-.doc-v { color: #cbd5e1; }
+.doc-k { color: var(--text); font-weight: 700; margin-right: 0.25rem; }
+.doc-v { color: var(--muted); }
 
 .modal-backdrop {
   position: fixed;
@@ -394,8 +404,8 @@ tbody tr:hover { background: rgba(37, 99, 235, 0.08); }
   width: 900px;
   max-width: 95vw;
   max-height: 88vh;
-  background: #0b1221;
-  border: 1px solid #1f2937;
+  background: linear-gradient(145deg, rgba(0, 255, 136, 0.05), rgba(0, 0, 0, 0.35)) #0b1221;
+  border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
   display: flex;
@@ -407,48 +417,51 @@ tbody tr:hover { background: rgba(37, 99, 235, 0.08); }
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 0.85rem;
-  border-bottom: 1px solid #1f2937;
-  background: #0f172a;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.35);
 }
 .modal-title { display: flex; flex-direction: column; gap: 0.1rem; }
-.modal-eyebrow { margin: 0; color: #cbd5e1; font-weight: 800; }
-.modal-sub { margin: 0; color: #94a3b8; font-size: 0.85rem; }
+.modal-eyebrow { margin: 0; color: var(--accent); font-weight: 800; letter-spacing: 0.04em; }
+.modal-sub { margin: 0; color: var(--muted); font-size: 0.85rem; }
 .close-btn {
   background: transparent;
-  border: 1px solid #1f2937;
-  color: #e5e7eb;
+  border: 1px solid var(--border);
+  color: var(--text);
   border-radius: 10px;
   width: 34px;
   height: 34px;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
-.close-btn:hover { border-color: #3273dc; color: #bfdbfe; }
+.close-btn:hover { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 10px rgba(0, 255, 136, 0.25); }
 
-.modal-tabs { display: flex; gap: 0.35rem; padding: 0.6rem 0.85rem; border-bottom: 1px solid #1f2937; }
+.modal-tabs { display: flex; gap: 0.35rem; padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--border); }
 .tab {
   background: #111827;
-  border: 1px solid #1f2937;
-  color: #cbd5e1;
+  border: 1px solid var(--border);
+  color: var(--text);
   border-radius: 10px;
   padding: 0.35rem 0.65rem;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
-.tab.active { border-color: #60a5fa; color: #bfdbfe; background: rgba(37, 99, 235, 0.12); }
+.tab.active { border-color: var(--accent); color: var(--accent); background: rgba(0, 255, 136, 0.1); box-shadow: 0 0 12px rgba(0, 255, 136, 0.2); }
 
 .modal-body { padding: 0.75rem 0.85rem; overflow: auto; }
 .doc-search {
   width: 100%;
   background: #0f172a;
-  color: #e5e7eb;
-  border: 1px solid #1f2937;
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 0.55rem 0.65rem;
   margin-bottom: 0.65rem;
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
-.doc-grid { border: 1px solid #1f2937; border-radius: 12px; overflow: hidden; }
+.doc-grid { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .doc-row { display: grid; grid-template-columns: 320px 1fr; gap: 0; border-bottom: 1px solid #1f2937; }
 .doc-row:last-child { border-bottom: none; }
-.doc-row.doc-head { background: #0f172a; font-weight: 800; color: #cbd5e1; }
+.doc-row.doc-head { background: rgba(0, 255, 136, 0.05); font-weight: 800; color: var(--text); }
 .doc-col { padding: 0.55rem 0.65rem; min-width: 0; }
 .doc-col.value { border-left: 1px solid #1f2937; }
 .doc-pill {
@@ -459,14 +472,14 @@ tbody tr:hover { background: rgba(37, 99, 235, 0.08); }
   height: 18px;
   border-radius: 6px;
   background: #1f2937;
-  color: #cbd5e1;
+  color: var(--text);
   font-size: 0.75rem;
   font-weight: 800;
   margin-right: 0.45rem;
 }
-.doc-field { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: #e5e7eb; }
-.doc-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
-.json-pre { background: #0f172a; border: 1px solid #1f2937; border-radius: 12px; padding: 0.75rem; color: #cbd5e1; overflow: auto; }
+.doc-field { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: var(--text); }
+.doc-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+.json-pre { background: #0f172a; border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem; color: var(--text); overflow: auto; box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02); }
 
 .pager {
   display: flex;
@@ -474,27 +487,29 @@ tbody tr:hover { background: rgba(37, 99, 235, 0.08); }
   align-items: center;
   gap: 1rem;
   margin-top: 0.5rem;
-  color: #cbd5e1;
+  color: var(--text);
   font-size: 0.9rem;
 }
 .page-size select {
   margin-left: 0.4rem;
   background: #0b1221;
-  color: #e5e7eb;
-  border: 1px solid #1f2937;
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.35rem 0.5rem;
 }
 .page-info { display: flex; align-items: center; gap: 0.45rem; }
 .nav {
   background: #111827;
-  border: 1px solid #1f2937;
-  color: #e5e7eb;
+  border: 1px solid var(--border);
+  color: var(--text);
   border-radius: 6px;
   padding: 0.35rem 0.55rem;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 .nav:disabled { opacity: 0.4; cursor: not-allowed; }
+.nav:not(:disabled):hover { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 10px rgba(0, 255, 136, 0.2); }
 
 @media (max-width: 820px) {
   .doc-row { grid-template-columns: 1fr; }

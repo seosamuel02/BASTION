@@ -1,8 +1,8 @@
-<!-- TimeRangePicker.vue: 시간 범위 입력/빠른 선택 컴포넌트 (키바나식 Quick Select 느낌) -->
+<!-- TimeRangePicker.vue: Time range input with quick-select presets -->
 <template>
   <div class="time-range-picker">
     <div class="label-row">
-      <label class="label">시간 범위</label>
+      <label class="label">TIME RANGE</label>
     </div>
 
     <div class="trigger-wrap">
@@ -17,14 +17,14 @@
             class="time-input"
             type="text"
             v-model="localFrom"
-            placeholder="from 예) now-24h"
+            placeholder="from e.g. now-24h"
           >
           <span class="sep">→</span>
           <input
             class="time-input"
             type="text"
             v-model="localTo"
-            placeholder="to 예) now"
+            placeholder="to e.g. now"
           >
         </div>
 
@@ -46,7 +46,7 @@
 
           <div class="quick-grid">
             <div class="quick-column">
-              <p class="quick-head">자주 쓰는 범위</p>
+              <p class="quick-head">Common ranges</p>
               <button
                 v-for="preset in presetCommon"
                 :key="preset.label"
@@ -57,7 +57,7 @@
               </button>
             </div>
             <div class="quick-column">
-              <p class="quick-head">최근 사용</p>
+              <p class="quick-head">Recent</p>
               <button
                 v-for="preset in presetRecent"
                 :key="preset.label"
@@ -71,10 +71,10 @@
         </div>
         <div class="popover-actions">
           <div class="actions-left">
-            <button class="ghost" @click="close">닫기</button>
+            <button class="ghost" @click="close">Close</button>
           </div>
           <div class="actions-right">
-            <button class="apply-btn" @click="applyCurrent">적용</button>
+            <button class="apply-btn" @click="applyCurrent">Apply</button>
           </div>
         </div>
       </div>
@@ -85,7 +85,7 @@
 <script setup>
 import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue';
 
-// ❖ TimeRangePicker: 키바나 Quick Select 스타일. 상대시간 프리셋과 입력값을 모두 emit
+// TimeRangePicker: Kibana-like quick select with relative presets
 const props = defineProps({
   timeRange: {
     type: Object,
@@ -137,7 +137,7 @@ const applyQuick = () => {
 };
 
 const toggleOpen = () => {
-  // 팝오버 열릴 때 현재 state를 로컬로 복사
+  // When opening the popover, copy current state into local inputs
   if (!isOpen.value) {
     localFrom.value = props.timeRange.from || '';
     localTo.value = props.timeRange.to || '';
@@ -180,6 +180,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 0.5rem;
   min-width: 320px;
+  color: var(--text-primary, #e0e6ed);
 }
 
 .label-row {
@@ -216,10 +217,12 @@ onBeforeUnmount(() => {
   padding: 0.65rem 0.75rem;
   cursor: pointer;
   min-height: 44px;
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
 .range-trigger:hover {
-  border-color: #3273dc;
+  border-color: var(--cyber-green, #00ff88);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
 }
 
 .value {
@@ -248,6 +251,7 @@ onBeforeUnmount(() => {
   padding: 0.65rem 0.7rem 0.5rem;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
   z-index: 20;
+  backdrop-filter: blur(6px);
 }
 
 .inputs {
@@ -265,11 +269,13 @@ onBeforeUnmount(() => {
   padding: 0.55rem 0.65rem;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   min-height: 42px;
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
 .time-input:focus {
-  outline: 1px solid #3273dc;
-  border-color: #3273dc;
+  outline: 1px solid var(--cyber-green, #00ff88);
+  border-color: var(--cyber-green, #00ff88);
+  box-shadow: 0 0 10px rgba(0, 255, 136, 0.25);
 }
 
 .sep {
@@ -319,18 +325,23 @@ onBeforeUnmount(() => {
 }
 
 .apply-btn {
-  background: linear-gradient(135deg, #3273dc, #285bb5);
-  color: #e5e7eb;
-  border: 1px solid #285bb5;
+  background: linear-gradient(135deg, var(--cyber-green, #00ff88), #00b46b);
+  color: #0a0e12;
+  border: 1px solid #00b46b;
   border-radius: 8px;
   padding: 0.55rem 0.8rem;
   cursor: pointer;
   font-weight: 600;
   min-height: 40px;
+  letter-spacing: 0.02em;
+  box-shadow: 0 6px 18px rgba(0, 255, 136, 0.25);
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
 }
 
 .apply-btn:hover {
   filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(0, 255, 136, 0.3);
 }
 
 .quick-grid {
@@ -364,9 +375,10 @@ onBeforeUnmount(() => {
 }
 
 .chip:hover {
-  border-color: #3273dc;
-  color: #bfdbfe;
-  background: #0f172a;
+  border-color: var(--cyber-green, #00ff88);
+  color: var(--cyber-green, #00ff88);
+  background: rgba(0, 255, 136, 0.05);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
 }
 
 .popover-actions {
@@ -390,11 +402,13 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   padding: 0.45rem 0.8rem;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 
 .ghost:hover {
-  border-color: #3273dc;
-  color: #bfdbfe;
+  border-color: var(--cyber-green, #00ff88);
+  color: var(--cyber-green, #00ff88);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
 }
 
 @media (max-width: 640px) {

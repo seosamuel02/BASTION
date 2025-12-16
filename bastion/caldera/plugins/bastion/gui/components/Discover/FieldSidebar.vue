@@ -1,9 +1,9 @@
-<!-- FieldSidebar.vue: 필드 목록 사이드바 (토글 열림/닫힘) -->
+<!-- FieldSidebar.vue: Field list sidebar with collapse toggle -->
 <template>
   <div class="field-sidebar" :class="{ collapsed: !open }">
     <button class="toggle" type="button" @click="$emit('toggle')">
-      <span v-if="open">◀ 필드</span>
-      <span v-else>필드 ▶</span>
+      <span v-if="open">◀ Fields</span>
+      <span v-else>Fields ▶</span>
     </button>
 
     <div v-if="open" class="content">
@@ -12,7 +12,7 @@
           class="search-input"
           type="text"
           v-model="keyword"
-          placeholder="필드 이름 검색"
+          placeholder="Search fields"
         >
         <span class="count">{{ filteredFields.length }}</span>
       </div>
@@ -20,16 +20,15 @@
       <div class="section">
         <p class="section-title">Available fields</p>
 
-        <!-- 전체 로그(Document) 토글 -->
         <button
           type="button"
           class="field-item all-doc"
           :class="{ selected: showDocument }"
           @click="emit('toggle-document')"
-          title="전체 로그(Document) 보기"
+          title="Show full document"
         >
           <span class="pill">∑</span>
-          <span class="name">모든 필드(전체 로그)</span>
+          <span class="name">All fields (document)</span>
           <span class="action">{{ showDocument ? '✓' : '+' }}</span>
         </button>
 
@@ -88,6 +87,7 @@ const onToggle = (name) => emit('toggle-field', name);
   width: 100%;
   min-width: 0;
   transition: padding 0.2s ease;
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
 .field-sidebar.collapsed {
@@ -103,11 +103,13 @@ const onToggle = (name) => emit('toggle-field', name);
   padding: 0.4rem 0.55rem;
   cursor: pointer;
   font-size: 0.9rem;
+  transition: all 0.2s ease;
 }
 
 .toggle:hover {
-  border-color: #3273dc;
-  color: #bfdbfe;
+  border-color: var(--cyber-green, #00ff88);
+  color: var(--cyber-green, #00ff88);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.25);
 }
 
 .content {
@@ -132,6 +134,7 @@ const onToggle = (name) => emit('toggle-field', name);
   border-radius: 8px;
   padding: 0.45rem 0.55rem;
   min-width: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
 .count {
@@ -175,17 +178,19 @@ const onToggle = (name) => emit('toggle-field', name);
   width: 100%;
   cursor: pointer;
   text-align: left;
+  transition: all 0.2s ease;
 }
 
 .field-item:hover {
-  border-color: #3273dc;
-  color: #bfdbfe;
-  background: #0f172a;
+  border-color: var(--cyber-green, #00ff88);
+  color: var(--cyber-green, #00ff88);
+  background: rgba(0, 255, 136, 0.04);
+  box-shadow: 0 0 10px rgba(0, 255, 136, 0.18);
 }
 
 .field-item.selected {
-  border-color: #60a5fa;
-  background: rgba(37, 99, 235, 0.12);
+  border-color: var(--cyber-green, #00ff88);
+  background: rgba(0, 255, 136, 0.08);
 }
 
 .pill {
