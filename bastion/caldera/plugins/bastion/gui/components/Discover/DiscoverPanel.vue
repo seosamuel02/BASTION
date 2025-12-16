@@ -10,13 +10,6 @@
     </header>
 
     <div class="control-bar">
-      <IndexSelector
-        class="control-item index"
-        :indices="indexOptions"
-        :selected="selectedIndex"
-        :disabled="!indices.length"
-        @update:selected="handleIndexChange"
-      />
       <SearchBar
         class="control-item search"
         :kql="kql"
@@ -33,6 +26,19 @@
 
     <div class="discover-body">
       <aside :class="['sidebar', { collapsed: !showSidebar }]">
+        <div v-if="showSidebar" class="index-panel">
+          <div class="sidebar-header">
+            <h4 class="section-title">Index</h4>
+            <span class="count-pill">{{ indexOptions.length }}</span>
+          </div>
+          <IndexSelector
+            mode="vertical"
+            :indices="indexOptions"
+            :selected="selectedIndex"
+            :disabled="!indices.length"
+            @update:selected="handleIndexChange"
+          />
+        </div>
         <FieldSidebar
           :fields="availableFields"
           :selected="visibleColumns"
@@ -456,6 +462,25 @@ onMounted(() => {
   color: var(--text);
   font-size: 0.95rem;
   font-weight: 700;
+}
+
+.index-panel {
+  background: rgba(0, 255, 136, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.65rem;
+  margin-bottom: 0.65rem;
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
+}
+
+.count-pill {
+  background: rgba(0, 255, 136, 0.12);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
 }
 
 .ghost-toggle {

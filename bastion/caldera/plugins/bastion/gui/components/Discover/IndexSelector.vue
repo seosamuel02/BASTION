@@ -1,35 +1,55 @@
-<!-- IndexSelector.vue: Index dropdown selector -->
+<!-- IndexSelector.vue: Index selector with dropdown or vertical list -->
 <template>
-  <div class="index-selector">
+  <div class="index-selector" :class="['mode-' + mode]">
     <label class="label">INDEX</label>
-    <div
-      class="trigger"
-      :class="{ disabled }"
-      @click="toggle"
-    >
-      <span class="value">{{ displayValue }}</span>
-      <span class="chevron" :class="{ open: isOpen && !disabled }">▼</span>
-    </div>
-    <div v-if="isOpen && !disabled" class="dropdown">
-      <button
-        v-for="opt in normalized"
-        :key="opt.value"
-        class="dropdown-item"
-        :class="{ selected: opt.value === props.selected }"
-        @click="selectIndex(opt.value)"
-        :title="opt.value"
+
+    <template v-if="mode === 'dropdown'">
+      <div
+        class="trigger"
+        :class="{ disabled }"
+        @click="toggle"
       >
-        <span class="check">{{ opt.value === props.selected ? '✓' : '' }}</span>
-        <span class="label-text">{{ opt.label }}</span>
-      </button>
-    </div>
+        <span class="value">{{ displayValue }}</span>
+        <span class="chevron" :class="{ open: isOpen && !disabled }">▼</span>
+      </div>
+      <div v-if="isOpen && !disabled" class="dropdown">
+        <button
+          v-for="opt in normalized"
+          :key="opt.value"
+          class="dropdown-item"
+          :class="{ selected: opt.value === props.selected }"
+          @click="selectIndex(opt.value)"
+          :title="opt.value"
+        >
+          <span class="check">{{ opt.value === props.selected ? '✓' : '' }}</span>
+          <span class="label-text">{{ opt.label }}</span>
+        </button>
+      </div>
+    </template>
+
+    <template v-else>
+      <div class="vertical-list">
+        <button
+          v-for="opt in normalized"
+          :key="opt.value"
+          class="vertical-item"
+          :class="{ selected: opt.value === props.selected, disabled }"
+          @click="selectIndex(opt.value)"
+          :disabled="disabled"
+          :title="opt.value"
+        >
+          <span class="v-label">{{ opt.label }}</span>
+          <span class="v-check" v-if="opt.value === props.selected">ACTIVE</span>
+        </button>
+      </div>
+    </template>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
 
-// IndexSelector: displays indices as dropdown and emits selection
+// IndexSelector: displays indices as dropdown or vertical list and emits selection
 const props = defineProps({
   indices: {
     type: Array,
@@ -42,6 +62,10 @@ const props = defineProps({
   disabled: {
     type: Boolean,
     default: false
+  },
+  mode: {
+    type: String,
+    default: 'dropdown' // 'dropdown' | 'vertical'
   }
 });
 
@@ -71,16 +95,19 @@ const normalized = computed(() => {
 });
 
 const toggle = () => {
-  if (props.disabled) return;
+  if (props.disabled || props.mode === 'vertical') return;
   isOpen.value = !isOpen.value;
 };
 
 const selectIndex = (idx) => {
   emit('update:selected', idx);
-  isOpen.value = false;
+  if (props.mode === 'dropdown') {
+    isOpen.value = false;
+  }
 };
 
 const handleClickOutside = (event) => {
+  if (props.mode === 'vertical') return;
   if (!event.target.closest('.index-selector')) {
     isOpen.value = false;
   }
@@ -107,6 +134,10 @@ onBeforeUnmount(() => {
 .label {
   color: #cbd5e1;
   font-size: 0.85rem;
+}
+
+.mode-vertical {
+  min-width: 0;
 }
 
 .trigger {
@@ -195,5 +226,61 @@ onBeforeUnmount(() => {
 .dropdown-item:hover {
   background: #0f172a;
   color: #bfdbfe;
+}
+
+.vertical-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 0.1rem;
+}
+
+.vertical-item {
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  background: #0f172a;
+  border: 1px solid #1f2937;
+  color: #e5e7eb;
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  transition: all 0.15s ease;
+}
+
+.vertical-item .v-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vertical-item .v-check {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: var(--cyber-green, #00ff88);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.vertical-item:hover:not(.disabled) {
+  border-color: var(--cyber-green, #00ff88);
+  color: var(--cyber-green, #00ff88);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
+}
+
+.vertical-item.selected {
+  border-color: var(--cyber-green, #00ff88);
+  background: rgba(0, 255, 136, 0.08);
+  box-shadow: 0 0 14px rgba(0, 255, 136, 0.22);
+}
+
+.vertical-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
