@@ -471,10 +471,24 @@ class BASTIONService:
             timeout = aiohttp.ClientTimeout(total=20)
             connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
             auth = aiohttp.BasicAuth(self.elastic_username, self.elastic_password)
-            url = f'{self.elastic_url}/{index}/_search'
+            search_url = f'{self.elastic_url}/{index}/_search'
+            field_caps_url = f'{self.elastic_url}/{index}/_field_caps?fields=*'
 
+            # Collect field names from field_caps for complete schema coverage
+            fields_from_caps = set()
             async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-                async with session.post(url, auth=auth, json=body) as resp:
+                try:
+                    async with session.get(field_caps_url, auth=auth) as resp:
+                        if resp.status == 200:
+                            caps_data = await resp.json()
+                            fields_dict = caps_data.get('fields', {}) or {}
+                            fields_from_caps.update(fields_dict.keys())
+                        else:
+                            self.log.warning(f'[Discover] field_caps fallback (HTTP {resp.status})')
+                except Exception as caps_err:
+                    self.log.warning(f'[Discover] field_caps fetch failed: {caps_err}')
+
+                async with session.post(search_url, auth=auth, json=body) as resp:
                     text = await resp.text()
                     if resp.status == 401:
                         return web.json_response({'error': 'Elasticsearch 인증 실패'}, status=401)
@@ -487,17 +501,31 @@ class BASTIONService:
                     hits = data.get('hits', {}).get('hits', [])
                     rows = []
                     columns = set()
+
+                    def flatten_keys(obj, prefix=''):
+                        keys = []
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                path = f'{prefix}.{k}' if prefix else k
+                                keys.append(path)
+                                if isinstance(v, dict):
+                                    keys.extend(flatten_keys(v, path))
+                        return keys
+
                     for hit in hits:
                         source = hit.get('_source', {}) or {}
                         doc_id = hit.get('_id')
                         if doc_id:
                             source['id'] = doc_id
                         rows.append(source)
-                        columns.update(source.keys())
-                    columns = sorted(list(columns))
+                        columns.update(flatten_keys(source))
+
+                    # Prefer field_caps result; otherwise fall back to columns from hits
+                    all_columns = fields_from_caps or columns
+                    columns_sorted = sorted(list(all_columns))
                     result = {
                         'total': data.get('hits', {}).get('total', {}).get('value', len(rows)),
-                        'columns': columns,
+                        'columns': columns_sorted,
                         'rows': rows
                     }
                     return web.json_response(result)
