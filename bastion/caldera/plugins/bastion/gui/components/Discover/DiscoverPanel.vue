@@ -41,6 +41,7 @@
         </div>
         <FieldSidebar
           :fields="availableFields"
+          :empty-fields="emptyFields"
           :selected="visibleColumns"
           :show-document="showDocument"
           :open="showSidebar"
@@ -139,9 +140,14 @@ const totalRows = computed(() => {
 });
 
 const availableFields = computed(() => {
+  if (results.value.fields?.available) {
+    return results.value.fields.available;
+  }
   const cols = results.value.columns || [];
   return [...new Set(cols.filter(Boolean))];
 });
+
+const emptyFields = computed(() => results.value.fields?.empty || []);
 
 // Order columns like Kibana: @timestamp + selected fields + document
 const tableColumns = computed(() => {

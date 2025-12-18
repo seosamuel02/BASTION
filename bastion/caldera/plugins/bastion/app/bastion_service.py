@@ -380,6 +380,14 @@ class BASTIONService:
                                 keys.append(path)
                                 if isinstance(v, dict):
                                     keys.extend(flatten_keys(v, path))
+                                elif isinstance(v, list):
+                                    for item in v:
+                                        if isinstance(item, dict):
+                                            keys.extend(flatten_keys(item, path))
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                if isinstance(item, dict):
+                                    keys.extend(flatten_keys(item, prefix))
                         return keys
 
                     for hit in hits:
@@ -390,12 +398,19 @@ class BASTIONService:
                         rows.append(source)
                         columns.update(flatten_keys(source))
 
-                    # Prefer field_caps result; otherwise fall back to columns from hits
-                    all_columns = fields_from_caps or columns
-                    columns_sorted = sorted(list(all_columns))
+                    used_fields = set(columns)
+                    all_fields = fields_from_caps or used_fields
+                    available_fields = used_fields
+                    empty_fields = set(all_fields) - used_fields
+
+                    columns_sorted = sorted(list(available_fields))
                     result = {
                         'total': data.get('hits', {}).get('total', {}).get('value', len(rows)),
                         'columns': columns_sorted,
+                        'fields': {
+                            'available': sorted(list(available_fields)),
+                            'empty': sorted(list(empty_fields))
+                        },
                         'rows': rows
                     }
                     return web.json_response(result)
