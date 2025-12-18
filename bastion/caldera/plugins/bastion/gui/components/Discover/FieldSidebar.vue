@@ -14,7 +14,7 @@
           v-model="keyword"
           placeholder="Search fields"
         >
-        <span class="count">{{ filteredFields.length }}</span>
+        <span class="count">{{ filteredAvailable.length }}</span>
       </div>
 
       <div class="section">
@@ -34,7 +34,7 @@
 
         <div class="field-list">
           <button
-            v-for="name in filteredFields"
+            v-for="name in filteredAvailable"
             :key="name"
             type="button"
             class="field-item"
@@ -48,6 +48,30 @@
           </button>
         </div>
       </div>
+
+      <div class="section collapsible">
+        <div class="section-header-row" @click="toggleEmpty">
+          <p class="section-title">Empty fields</p>
+          <span class="count">{{ filteredEmpty.length }}</span>
+          <span class="chevron" :class="{ open: showEmpty }">▼</span>
+        </div>
+        <transition name="fade">
+          <div v-if="showEmpty" class="field-list empty-list">
+            <button
+              v-for="name in filteredEmpty"
+              :key="name"
+              type="button"
+              class="field-item empty"
+              disabled
+              :title="name + ' (no values in current results)'"
+            >
+              <span class="pill muted">e</span>
+              <span class="name">{{ name }}</span>
+              <span class="action">—</span>
+            </button>
+          </div>
+        </transition>
+      </div>
     </div>
   </div>
 </template>
@@ -57,6 +81,7 @@ import { computed, ref } from 'vue';
 
 const props = defineProps({
   fields: { type: Array, default: () => [] },
+  emptyFields: { type: Array, default: () => [] },
   selected: { type: Array, default: () => [] },
   open: { type: Boolean, default: true },
   showDocument: { type: Boolean, default: true }
@@ -65,16 +90,25 @@ const props = defineProps({
 const emit = defineEmits(['toggle', 'toggle-field', 'toggle-document']);
 
 const keyword = ref('');
+const showEmpty = ref(false);
 
-const filteredFields = computed(() => {
+const filteredAvailable = computed(() => {
   const k = keyword.value.trim().toLowerCase();
   const list = (props.fields || []).filter(Boolean);
   if (!k) return list;
   return list.filter((f) => f.toLowerCase().includes(k));
 });
 
+const filteredEmpty = computed(() => {
+  const k = keyword.value.trim().toLowerCase();
+  const list = (props.emptyFields || []).filter(Boolean);
+  if (!k) return list;
+  return list.filter((f) => f.toLowerCase().includes(k));
+});
+
 const isSelected = (name) => (props.selected || []).includes(name);
 const onToggle = (name) => emit('toggle-field', name);
+const toggleEmpty = () => { showEmpty.value = !showEmpty.value; };
 </script>
 
 <style scoped>
@@ -193,6 +227,11 @@ const onToggle = (name) => emit('toggle-field', name);
   background: rgba(0, 255, 136, 0.08);
 }
 
+.field-item.empty {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -219,5 +258,48 @@ const onToggle = (name) => emit('toggle-field', name);
 .action {
   color: #94a3b8;
   font-weight: 800;
+}
+
+.collapsible .section-header-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  padding: 0.35rem 0.25rem;
+  border-radius: 6px;
+}
+
+.collapsible .section-header-row:hover {
+  background: rgba(0, 255, 136, 0.05);
+}
+
+.chevron {
+  margin-left: auto;
+  transition: transform 0.15s ease;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.chevron.open {
+  transform: rotate(180deg);
+}
+
+.pill.muted {
+  background: #1f2937;
+  color: #94a3b8;
+}
+
+.empty-list {
+  max-height: 300px;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.15s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 </style>
