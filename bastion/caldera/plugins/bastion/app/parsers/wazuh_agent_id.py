@@ -25,8 +25,13 @@ class Parser(BaseParser):
             if not match or match.strip() == "NONE":
                 continue
 
-            # Extract agent ID (should be numeric like "001", "002", etc.)
-            agent_id = match.strip()
+            # expected format: "001 agent-name any key_content"
+            parts = match.strip().split()
+            if not parts:
+                continue
+
+            # Extract agent ID (first field)
+            agent_id = parts[0]
 
             # Validate it's a valid agent ID (numeric)
             if agent_id.isdigit():

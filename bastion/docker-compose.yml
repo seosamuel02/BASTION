@@ -1,3 +1,4 @@
+# docker-compose.yml
 # BASTION - Caldera-Wazuh Integration Platform
 # Unified Docker Compose for development
 
@@ -104,6 +105,8 @@ services:
       - WAZUH_PASSWORD=MyS3cur3P@ssw0rd!
       - WAZUH_INDEXER_USERNAME=elastic
       - WAZUH_INDEXER_PASSWORD=Kimdong2024
+      - ELASTIC_USERNAME=${ELASTIC_USERNAME}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     volumes:
       # BASTION plugin configuration
       - ./caldera/conf/local.yml:/usr/src/app/conf/local.yml

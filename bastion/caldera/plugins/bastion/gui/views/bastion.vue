@@ -1,5 +1,6 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, inject, computed, watch } from "vue";
+import DiscoverPanel from "../components/Discover/DiscoverPanel.vue";
 import { Bar, Line } from 'vue-chartjs';
 import {
   Chart as ChartJS,
@@ -63,6 +64,7 @@ const transformDetectionEvents = (rawEvents) => {
     attack_step_id: ev.attack_step_id || ev.link_id || null,
     match_source: ev.match_source || ev.source || 'wazuh',
     opId: ev.opId || ev.operation_id || ev.op_id || null,
+    // Raw event data for Splunk-like detail view
     full_log: ev.full_log || '',
     raw_data: ev.raw_data || {},
     syscheck: ev.syscheck || {},
@@ -477,14 +479,19 @@ const formatCoverage = (coverage) => {
   return `${(coverage * 100).toFixed(1)}%`;
 };
 
+// Flatten nested object for Splunk-like display
 const flattenEventData = (obj, prefix = '') => {
   const result = {};
   if (!obj || typeof obj !== 'object') return result;
 
   for (const [key, value] of Object.entries(obj)) {
     const fullKey = prefix ? `${prefix}.${key}` : key;
+
+    // Skip mitre field (already displayed separately)
     if (key === 'mitre') continue;
+
     if (value && typeof value === 'object' && !Array.isArray(value)) {
+      // Recursively flatten nested objects
       Object.assign(result, flattenEventData(value, fullKey));
     } else {
       result[fullKey] = value;
@@ -493,6 +500,7 @@ const flattenEventData = (obj, prefix = '') => {
   return result;
 };
 
+// Format event value for display
 const formatEventValue = (value) => {
   if (value === null || value === undefined) return 'N/A';
   if (Array.isArray(value)) {
@@ -509,6 +517,7 @@ const filteredKPI = computed(() => {
   const filtered_detections = filteredDetections.value;
   const filtered_operations = filteredOperations.value;
 
+  // Calculate total attack steps from filtered operations
   let total_attack_steps = 0;
   const uniqueTechniques = new Set();
   const detectedTechniques = new Set();
@@ -516,6 +525,7 @@ const filteredKPI = computed(() => {
 
   for (const op of filtered_operations) {
     for (const step of (op.attack_steps || [])) {
+      // Apply OS filter to attack steps
       if (filters.os_filter !== 'all') {
         const agentPlatform = op.agent_platforms?.[step.paw];
         if (!agentPlatform) continue;
@@ -535,18 +545,22 @@ const filteredKPI = computed(() => {
     }
   }
 
+  // Calculate detected techniques from filtered detections
   for (const detection of filtered_detections) {
     if (detection.technique_id) {
       detectedTechniques.add(detection.technique_id);
     }
   }
 
+  // Calculate detection rate based on filtered data
   const detection_rate = total_attack_steps > 0
     ? Math.min(100, Math.round((filtered_detections.length / total_attack_steps) * 100))
     : 0;
 
+  // Calculate security score from detection rate
   const security_score = detection_rate;
 
+  // Calculate security grade from score
   let security_grade = 'N/A';
   if (total_attack_steps > 0) {
     if (security_score >= 90) security_grade = 'A';
@@ -556,12 +570,17 @@ const filteredKPI = computed(() => {
     else security_grade = 'F';
   }
 
+  // Calculate critical gaps (techniques simulated but not detected)
   const critical_gaps = uniqueTechniques.size - detectedTechniques.size;
+
+  // Calculate tactic coverage
   const tactic_coverage = uniqueTactics.size;
 
+  // Calculate MTTD from matched detections
   let mttd_minutes = 0;
   const matchedDetections = filtered_detections.filter(d => d.match_status === 'matched');
   if (matchedDetections.length > 0) {
+    // Use backend MTTD if available, otherwise show 0
     const kpi = dashboardData.kpi || {};
     mttd_minutes = kpi.mttd_minutes || 0;
   }
@@ -624,6 +643,7 @@ const tacticChartData = computed(() => {
       tacticStats[tactic].detected += 1;
     }
   }
+  // Cap detected count at executed count per tactic to prevent chart distortion
   for (const tactic of Object.keys(tacticStats)) {
     if (tacticStats[tactic].detected > tacticStats[tactic].executed) {
       tacticStats[tactic].detected = tacticStats[tactic].executed;
@@ -1194,6 +1214,15 @@ const timelineChartOptions = {
             <span class="summary-value">{{ Math.min(heatMapData.summary.overall_detection_rate || 0, 100) }}%</span>
           </div>
         </div>
+        <div class="summary-card green">
+          <span class="summary-label">DETECTED</span>
+          <span class="summary-value">{{ heatMapData.summary.total_detected }}</span>
+        </div>
+        <div class="summary-card" :style="{ '--accent-color': heatMapSummaryColor }">
+          <span class="summary-label">DETECTION_RATE</span>
+          <span class="summary-value">{{ Math.min(heatMapData.summary.overall_detection_rate || 0, 100) }}%</span>
+        </div>
+      </div>
 
         <!-- Techniques Table -->
         <div class="table-container">
@@ -2632,8 +2661,39 @@ section {
   background: transparent;
 }
 
+.step-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  padding: 0.2rem 0.4rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--cyber-cyan);
+  color: var(--cyber-cyan);
+  max-width: 150px;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  padding: 0.2rem 0.4rem;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+}
+
 .na {
   color: var(--text-muted);
+}
+
+.operation-cell {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .description-cell {
