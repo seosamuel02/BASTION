@@ -1,8 +1,8 @@
-<!-- IndexSelector.vue: Index selector with dropdown or vertical list -->
 <template>
   <div class="index-selector" :class="['mode-' + mode]">
     <label class="label">INDEX</label>
 
+    <!-- Dropdown mode -->
     <template v-if="mode === 'dropdown'">
       <div
         class="trigger"
@@ -12,6 +12,7 @@
         <span class="value">{{ displayValue }}</span>
         <span class="chevron" :class="{ open: isOpen && !disabled }">▼</span>
       </div>
+
       <div v-if="isOpen && !disabled" class="dropdown">
         <button
           v-for="opt in normalized"
@@ -27,6 +28,7 @@
       </div>
     </template>
 
+    <!-- Vertical mode -->
     <template v-else>
       <div class="vertical-list">
         <button

@@ -995,6 +995,16 @@ const timelineChartOptions = {
               </div>
             </div>
           </div>
+    <!-- Discover (UI 프리뷰) -->
+    <section class="discover-section">
+      <div class="section-header">
+        <span class="section-icon">[D]</span>
+        <h2 class="section-title">DISCOVER</h2>
+      </div>
+      <div class="discover-wrapper">
+        <DiscoverPanel />
+      </div>
+    </section>
 
           <!-- Detection Rate -->
           <div class="kpi-card cyber-green">
