@@ -12,15 +12,15 @@
     <div class="control-bar">
       <SearchBar
         class="control-item search"
-        :kql="kql"
+        :value="kql"
         :loading="isSearching"
-        @update:kql="handleKqlChange"
-        @search="handleSubmit"
+        @update:value="handleKqlChange"
+        @submit="handleSubmit"
       />
       <TimeRangePicker
         class="control-item time"
-        :time-range="timeRange"
-        @update:time-range="handleTimeRangeChange"
+        :value="timeRange"
+        @update:value="handleTimeRangeChange"
       />
     </div>
 
@@ -66,6 +66,7 @@
           <div v-else class="collapsed-note">Filter panel is hidden.</div>
         </div>
       </aside>
+
       <main class="results">
         <ResultTable
           :results="tableResults"
@@ -74,7 +75,7 @@
           :current-index="selectedIndex"
           :page="page"
           :page-size="pageSize"
-          :page-size-options="pageSizeOptions"
+          :total="totalRows"
           @update:page="handlePage"
           @update:page-size="handlePageSize"
         />
@@ -84,17 +85,18 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, inject, computed } from 'vue';
+import { ref, computed, reactive, onMounted, inject } from 'vue';
+
 import IndexSelector from './IndexSelector.vue';
 import SearchBar from './SearchBar.vue';
 import TimeRangePicker from './TimeRangePicker.vue';
-import FieldFilter from './FieldFilter.vue';
-import ResultTable from './ResultTable.vue';
 import FieldSidebar from './FieldSidebar.vue';
+import ResultTable from './ResultTable.vue';
 
 // DiscoverPanel keeps discover state centralized and fans out via props/emits
 const $api = inject('$api');
 
+// ─ 상태 ─
 const indices = ref([]);
 const selectedIndex = ref('');
 const indexOptions = computed(() => {
@@ -113,12 +115,18 @@ const indexOptions = computed(() => {
   return opts;
 });
 const kql = ref('');
+// 기본 시간 범위: now-7d ~ now (Kibana Discover 유사)
 const timeRange = reactive({
   from: 'now-15m',
   to: 'now'
 });
+
 const fieldFilters = ref([]);
 const showFilters = ref(true);
+
+// Document(전체 로그) 토글
+const showDocument = ref(true);
+// 사용자가 선택한 추가 컬럼
 const visibleColumns = ref([]);
 const showDocument = ref(true);
 
@@ -128,16 +136,25 @@ const results = ref({
   rows: []
 });
 const page = ref(1);
-const pageSize = ref(25);
-const pageSizeOptions = [10, 25, 50, 100];
+const pageSize = ref(100); // Kibana 기본 100 rows와 유사
 
-const totalRows = computed(() => {
-  const explicitTotal = results.value.total;
-  if (explicitTotal !== undefined && explicitTotal !== null) {
-    return explicitTotal;
+// ─ 인덱스 옵션(Data View 느낌) ─
+const indexOptions = computed(() => {
+  const list = indices.value || [];
+  const hasWazuhAlerts = list.some((name) => typeof name === 'string' && name.startsWith('wazuh-alerts-'));
+
+  const opts = [];
+  if (hasWazuhAlerts) {
+    opts.push({ value: 'wazuh-alerts-*', label: 'wazuh-alerts-*', hint: 'Data view (pattern)' });
   }
-  return results.value.rows?.length ?? 0;
+  for (const name of list) {
+    opts.push({ value: name, label: name, hint: '' });
+  }
+  return opts;
 });
+
+// ─ 결과/필드/컬럼 ─
+const results = ref({ total: 0, columns: [], rows: [] });
 
 const availableFields = computed(() => {
   if (results.value.fields?.available) {
@@ -200,6 +217,9 @@ const toggleDocument = () => {
   }
 };
 
+// 백엔드가 size/offset으로 페이징하므로 slice 금지
+const pagedResults = computed(() => tableResults.value);
+
 const isSearching = ref(false);
 const showSidebar = ref(true);
 
@@ -208,7 +228,6 @@ async function searchLogs({ index, kql, timeRange, filters }) {
     console.warn('[Discover] $api injection failed');
     return { total: 0, columns: [], rows: [] };
   }
-
   try {
       const { data } = await $api.post('/api/discover/search', {
         index,
@@ -238,8 +257,7 @@ const runSearch = async ({ resetPage = false } = {}) => {
     const data = await searchLogs({
       index: selectedIndex.value,
       kql: kql.value,
-      timeRange: { ...timeRange },
-      filters: fieldFilters.value
+      timeRange: { ...timeRange }
     });
     results.value = data;
     if (!showDocument.value && visibleColumns.value.length === 0 && availableFields.value.length) {
@@ -280,9 +298,7 @@ const handleIndexChange = (value) => {
   runSearch({ resetPage: true });
 };
 
-const handleKqlChange = (value) => {
-  kql.value = value;
-};
+const handleKqlChange = (value) => { kql.value = value; };
 
 const handleSubmit = () => {
   runSearch({ resetPage: true });
@@ -294,31 +310,7 @@ const handleTimeRangeChange = (value) => {
   runSearch({ resetPage: true });
 };
 
-const handleAddFilter = (filter) => {
-  fieldFilters.value = [
-    ...fieldFilters.value,
-    { ...filter, id: Date.now() }
-  ];
-};
-
-const handleUpdateFilter = (updated) => {
-  const idx = fieldFilters.value.findIndex((f) => f.id === updated.id);
-  if (idx !== -1) {
-    fieldFilters.value[idx] = { ...fieldFilters.value[idx], ...updated };
-  }
-};
-
-const handleRemoveFilter = (id) => {
-  fieldFilters.value = fieldFilters.value.filter((f) => f.id !== id);
-};
-
-const toggleFilters = () => {
-  showFilters.value = !showFilters.value;
-};
-
-const toggleSidebar = () => {
-  showSidebar.value = !showSidebar.value;
-};
+const toggleSidebar = () => { showSidebar.value = !showSidebar.value; };
 
 const handlePage = (val) => {
   page.value = val;
@@ -414,18 +406,9 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
-.control-item.index {
-  min-width: 220px;
-}
-
-.control-item.search {
-  flex: 1;
-  min-width: 320px;
-}
-
-.control-item.time {
-  min-width: 260px;
-}
+.control-item.index { min-width: 220px; }
+.control-item.search { flex: 1; min-width: 320px; }
+.control-item.time { min-width: 260px; }
 
 .discover-body {
   display: flex;
@@ -534,13 +517,8 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
-  .discover-header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .discover-body {
-    grid-template-columns: 1fr;
-  }
+  .discover-header { flex-direction: column; align-items: flex-start; }
+  .discover-body { flex-direction: column; }
+  .sidebar { flex: 1; }
 }
 </style>

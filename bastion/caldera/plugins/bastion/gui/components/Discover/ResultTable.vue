@@ -481,6 +481,24 @@ tbody tr:hover { background: rgba(0, 255, 136, 0.05); }
 .doc-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
 .json-pre { background: #0f172a; border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem; color: var(--text); overflow: auto; box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02); }
 
+.doc-cell {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.35rem;
+}
+
+.doc-key {
+  color: #bfdbfe;
+  font-weight: 600;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.doc-val {
+  color: #e5e7eb;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  word-break: break-all;
+}
+
 .pager {
   display: flex;
   justify-content: space-between;

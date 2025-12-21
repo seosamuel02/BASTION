@@ -74,6 +74,19 @@ const props = defineProps({
 const emit = defineEmits(['update:selected']);
 const isOpen = ref(false);
 
+const normalizedOptions = computed(() => {
+  const list = props.indices || [];
+  return list
+    .map((item) => {
+      if (!item) return null;
+      if (typeof item === 'string') return { value: item, label: item, hint: '' };
+      const value = item.value ?? '';
+      if (!value) return null;
+      return { value, label: item.label ?? value, hint: item.hint ?? '' };
+    })
+    .filter(Boolean);
+});
+
 const displayValue = computed(() => {
   if (props.selected) return props.selected;
   if (!props.indices.length) return 'No indices';
@@ -115,13 +128,8 @@ const handleClickOutside = (event) => {
   }
 };
 
-onMounted(() => {
-  window.addEventListener('click', handleClickOutside);
-});
-
-onBeforeUnmount(() => {
-  window.removeEventListener('click', handleClickOutside);
-});
+onMounted(() => window.addEventListener('click', handleClickOutside));
+onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
 </script>
 
 <style scoped>
@@ -130,7 +138,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  min-width: 200px;
+  min-width: 220px;
 }
 
 .label {
@@ -156,24 +164,16 @@ onBeforeUnmount(() => {
   box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
-.trigger.disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
+.trigger.disabled { cursor: not-allowed; opacity: 0.6; }
+.trigger:hover { border-color: #3273dc; }
 
 .trigger:hover {
   border-color: var(--cyber-green, #00ff88);
   box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
 }
 
-.chevron {
-  transition: transform 0.15s ease;
-  font-size: 0.8rem;
-}
-
-.chevron.open {
-  transform: rotate(180deg);
-}
+.chevron { transition: transform 0.15s ease; font-size: 0.8rem; }
+.chevron.open { transform: rotate(180deg); }
 
 .dropdown {
   position: absolute;
