@@ -23,6 +23,12 @@ services:
       - wazuh_api_configuration:/var/ossec/api/configuration
       - wazuh_etc:/var/ossec/etc
       - wazuh_logs:/var/ossec/logs
+      # Custom optimized ossec.conf (reduced ruleset for memory optimization)
+      - ./wazuh-rules/ossec_custom.conf:/var/ossec/etc/ossec.conf
+      # Custom Caldera detection rules
+      - ./wazuh-rules/caldera_detection_rules.xml:/var/ossec/etc/rules/caldera_detection_rules.xml
+      # Wazuh internal options (JSON decoder field limit)
+      - ./wazuh-rules/local_internal_options.conf:/var/ossec/etc/local_internal_options.conf
       - wazuh_queue:/var/ossec/queue
       - wazuh_var_multigroups:/var/ossec/var/multigroups
       - wazuh_integrations:/var/ossec/integrations
@@ -108,9 +114,11 @@ services:
       - ./caldera/conf/payloads.yml:/usr/src/app/conf/payloads.yml
       # BASTION integration engine config
       - ./caldera/plugins/bastion/app/conf/default.yml:/usr/src/app/plugins/bastion/app/conf/default.yml
-      # BASTION plugin source code (for hot-reload development)
-      - ./caldera/plugins/bastion:/usr/src/app/plugins/bastion
-      # ⚠️ Disabled to preserve opensearch-py installed by Dockerfile
+      # BASTION plugin source code (개별 파일 마운트로 opensearch-py 보존)
+      - ./caldera/plugins/bastion/app/bastion_service.py:/usr/src/app/plugins/bastion/app/bastion_service.py
+      - ./caldera/plugins/bastion/app/integration_engine.py:/usr/src/app/plugins/bastion/app/integration_engine.py
+      # BASTION GUI view
+      - ./caldera/plugins/bastion/gui/views/bastion.vue:/usr/src/app/plugins/bastion/gui/views/bastion.vue
       # Persist Caldera data
       - caldera_data:/usr/src/app/data
     depends_on:
