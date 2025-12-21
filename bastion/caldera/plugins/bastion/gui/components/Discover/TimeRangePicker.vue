@@ -90,14 +90,10 @@ const props = defineProps({
   timeRange: {
     type: Object,
     default: () => ({ from: '', to: '' })
-  },
-  value: { // 호환용 (DiscoverPanel에서 value로 전달 가능)
-    type: Object,
-    default: null
   }
 });
 
-const emit = defineEmits(['update:time-range', 'update:value']);
+const emit = defineEmits(['update:time-range']);
 
 const quick = reactive({
   count: 15,
@@ -128,9 +124,8 @@ const presetRecent = [
 ];
 
 const summary = computed(() => {
-  const range = props.value || props.timeRange || {};
-  const from = range.from || 'from';
-  const to = range.to || 'to';
+  const from = props.timeRange.from || 'from';
+  const to = props.timeRange.to || 'to';
   return `${from} → ${to}`;
 });
 
@@ -144,9 +139,8 @@ const applyQuick = () => {
 const toggleOpen = () => {
   // When opening the popover, copy current state into local inputs
   if (!isOpen.value) {
-    const range = props.value || props.timeRange || {};
-    localFrom.value = range.from || '';
-    localTo.value = range.to || '';
+    localFrom.value = props.timeRange.from || '';
+    localTo.value = props.timeRange.to || '';
   }
   isOpen.value = !isOpen.value;
 };
@@ -161,9 +155,7 @@ const setPreset = (from, to) => {
 };
 
 const applyCurrent = () => {
-  const payload = { from: localFrom.value || '', to: localTo.value || '' };
-  emit('update:time-range', payload);
-  emit('update:value', payload);
+  emit('update:time-range', { from: localFrom.value || '', to: localTo.value || '' });
   isOpen.value = false;
 };
 

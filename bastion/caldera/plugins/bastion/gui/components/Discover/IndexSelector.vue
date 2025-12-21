@@ -74,25 +74,29 @@ const props = defineProps({
 const emit = defineEmits(['update:selected']);
 const isOpen = ref(false);
 
-const normalizedOptions = computed(() => {
-  const list = props.indices || [];
-  return list
-    .map((item) => {
-      if (!item) return null;
-      if (typeof item === 'string') return { value: item, label: item, hint: '' };
-      const value = item.value ?? '';
-      if (!value) return null;
-      return { value, label: item.label ?? value, hint: item.hint ?? '' };
-    })
-    .filter(Boolean);
-});
-
 const displayValue = computed(() => {
   if (props.selected) return props.selected;
   if (!props.indices.length) return 'No indices';
   return 'Select index';
 });
 
+const normalized = computed(() => {
+  const list = props.indices || [];
+  return list
+    .map((x) => {
+      if (typeof x === 'string') return { label: x, value: x };
+      if (x && typeof x === 'object') {
+        const value = x.value ?? x.label;
+        const label = x.label ?? x.value;
+        if (!value) return null;
+        return { label: String(label), value: String(value) };
+      }
+      return null;
+    })
+    .filter(Boolean);
+});
+
+// ✅ indices를 문자열 배열 / {label,value} 배열 모두 지원
 const normalized = computed(() => {
   const list = props.indices || [];
   return list
@@ -128,8 +132,13 @@ const handleClickOutside = (event) => {
   }
 };
 
-onMounted(() => window.addEventListener('click', handleClickOutside));
-onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
+onMounted(() => {
+  window.addEventListener('click', handleClickOutside);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('click', handleClickOutside);
+});
 </script>
 
 <style scoped>
@@ -138,7 +147,7 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  min-width: 220px;
+  min-width: 200px;
 }
 
 .label {
@@ -164,16 +173,24 @@ onBeforeUnmount(() => window.removeEventListener('click', handleClickOutside));
   box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.02);
 }
 
-.trigger.disabled { cursor: not-allowed; opacity: 0.6; }
-.trigger:hover { border-color: #3273dc; }
+.trigger.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 
 .trigger:hover {
   border-color: var(--cyber-green, #00ff88);
   box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
 }
 
-.chevron { transition: transform 0.15s ease; font-size: 0.8rem; }
-.chevron.open { transform: rotate(180deg); }
+.chevron {
+  transition: transform 0.15s ease;
+  font-size: 0.8rem;
+}
+
+.chevron.open {
+  transform: rotate(180deg);
+}
 
 .dropdown {
   position: absolute;

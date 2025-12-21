@@ -40,6 +40,7 @@
             class="field-item"
             :class="{ selected: isSelected(name) }"
             @click="onToggle(name)"
+            :title="name"
           >
             <span class="pill">k</span>
             <span class="name">{{ name }}</span>
@@ -94,7 +95,8 @@ const showEmpty = ref(false);
 const filteredAvailable = computed(() => {
   const k = keyword.value.trim().toLowerCase();
   const list = (props.fields || []).filter(Boolean);
-  return !k ? list : list.filter((f) => f.toLowerCase().includes(k));
+  if (!k) return list;
+  return list.filter((f) => f.toLowerCase().includes(k));
 });
 
 const filteredEmpty = computed(() => {
@@ -241,7 +243,6 @@ const toggleEmpty = () => { showEmpty.value = !showEmpty.value; };
   color: #cbd5e1;
   font-size: 0.75rem;
   font-weight: 700;
-  flex: 0 0 auto;
 }
 
 .name {

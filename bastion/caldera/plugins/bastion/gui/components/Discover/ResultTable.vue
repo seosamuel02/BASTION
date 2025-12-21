@@ -495,9 +495,56 @@ tbody tr:hover { background: rgba(0, 255, 136, 0.05); }
 
 .doc-val {
   color: #e5e7eb;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  word-break: break-all;
+  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
 }
+.close-btn:hover { border-color: #3273dc; color: #bfdbfe; }
+
+.modal-tabs { display: flex; gap: 0.35rem; padding: 0.6rem 0.85rem; border-bottom: 1px solid #1f2937; }
+.tab {
+  background: #111827;
+  border: 1px solid #1f2937;
+  color: #cbd5e1;
+  border-radius: 10px;
+  padding: 0.35rem 0.65rem;
+  cursor: pointer;
+}
+.tab.active { border-color: #60a5fa; color: #bfdbfe; background: rgba(37, 99, 235, 0.12); }
+
+.modal-body { padding: 0.75rem 0.85rem; overflow: auto; }
+.doc-search {
+  width: 100%;
+  background: #0f172a;
+  color: #e5e7eb;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  margin-bottom: 0.65rem;
+}
+.doc-grid { border: 1px solid #1f2937; border-radius: 12px; overflow: hidden; }
+.doc-row { display: grid; grid-template-columns: 320px 1fr; gap: 0; border-bottom: 1px solid #1f2937; }
+.doc-row:last-child { border-bottom: none; }
+.doc-row.doc-head { background: #0f172a; font-weight: 800; color: #cbd5e1; }
+.doc-col { padding: 0.55rem 0.65rem; min-width: 0; }
+.doc-col.value { border-left: 1px solid #1f2937; }
+.doc-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: #1f2937;
+  color: #cbd5e1;
+  font-size: 0.75rem;
+  font-weight: 800;
+  margin-right: 0.45rem;
+}
+.doc-field { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: #e5e7eb; }
+.doc-value { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+.json-pre { background: #0f172a; border: 1px solid #1f2937; border-radius: 12px; padding: 0.75rem; color: #cbd5e1; overflow: auto; }
 
 .pager {
   display: flex;
