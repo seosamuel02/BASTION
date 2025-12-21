@@ -266,6 +266,9 @@ const loadIndices = async () => {
     if (selectedIndex.value) {
       await runSearch({ resetPage: true });
     }
+    if (selectedIndex.value) {
+      await runSearch();
+    }
   } catch (e) {
     console.error('[Discover] failed to load indices', e);
   }
