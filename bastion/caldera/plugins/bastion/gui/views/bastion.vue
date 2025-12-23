@@ -1222,8 +1222,7 @@ const timelineChartOptions = {
           <span class="summary-label">DETECTION_RATE</span>
           <span class="summary-value">{{ Math.min(heatMapData.summary.overall_detection_rate || 0, 100) }}%</span>
         </div>
-      </div>
-
+        
         <!-- Techniques Table -->
         <div class="table-container">
           <table class="cyber-table">
@@ -1607,6 +1606,17 @@ const timelineChartOptions = {
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- Discover Section -->
+      <section class="discover-section">
+        <div class="section-header">
+          <span class="section-icon">[?]</span>
+          <h2 class="section-title">DISCOVER</h2>
+        </div>
+        <div class="discover-wrapper">
+          <DiscoverPanel />
         </div>
       </section>
 
@@ -2816,6 +2826,17 @@ section {
 .result-value.highlight {
   color: var(--cyber-green);
   font-weight: 700;
+}
+
+/* Discover Section */
+.discover-section {
+  padding-top: 0.5rem;
+}
+
+.discover-wrapper {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  padding: 1rem;
 }
 
 /* Footer */
